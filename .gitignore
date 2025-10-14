@@ -1,0 +1,8 @@
+# vscode configuration dir
+.vscode
+
+# cmake dir
+build/
+
+# binaries
+*.exe

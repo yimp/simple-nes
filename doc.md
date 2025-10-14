@@ -11,6 +11,7 @@
 | **Libretro API (Interface)** |  定义标准接口，使核心可以被任何前端加载   |
 
 在本系列教程中，整个模拟器的结构将会采取RetroArch的思路来进行设计。
+
  分为三个主要部分：
 
 ```
@@ -115,3 +116,135 @@
 | **内置终端与任务系统** |      可以直接运行 CMake/Ninja 命令，无需额外切换环境      |
 |   **优秀的调试支持**   | 通过 CodeLLDB 或 C++ Debugger 可直接断点调试 NES 核心代码 |
 
+# 3.框架搭建
+
+## 日志模块
+
+在任何一个软件系统中，日志都是必不可少的。它帮助我们更直观的理解程序的运行途径，有时候比直接调试程序能更快的发现程序BUG。本系列将实现一个轻量级的日志器，在实现的过程中顺带讲解一些基础的c++知识。
+
+主要组成部分：
+
+| 模块                                    | 作用                                           |
+| --------------------------------------- | ---------------------------------------------- |
+| `Timestamp`                             | 负责生成时间戳字符串                           |
+| `Logger`                                | 日志系统主体，支持不同级别的日志               |
+| `Logger::LogEntry`                      | 记录源代码上下文（文件、行号、函数名）         |
+| 一组宏定义（`LOG_INFO`, `LOG_WARN`, …） | 简化调用，自动捕获上下文信息                   |
+| `logger_ctx` 命名空间                   | 存放线程 ID、进程 ID、日志文件句柄等上下文数据 |
+
+### 实现重点
+
+### (1) 可变参数模板与格式化输出
+
+```c++
+template<typename... Args>
+std::string formatString(const char* fmt, Args&&... args)
+```
+
+- 使用 **模板参数包** (`Args...`) 支持任意数量参数；
+- 内部调用 `std::snprintf` 实现类似 `printf` 的格式化；
+- 对于长度不确定的字符串，使用了两种缓冲策略：
+  - 优先使用 `thread_local char buf[1024]`
+  - 超长时再动态分配 `std::vector<char>`
+
+👉 **重点理解：**
+
+- 可变参数模板的展开与转发（`std::forward`）
+- 为什么要用 `thread_local`：避免多线程共享缓冲区带来的竞争
+- `std::snprintf(nullptr, 0, fmt, args...)` 用于预估字符串长度的技巧
+
+###  (2) 日志级别控制
+
+```c++
+enum {
+    LOG_LEVEL_TRACE,
+    LOG_LEVEL_DEBUG,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_WARN,
+    LOG_LEVEL_ERROR,
+    LOG_LEVEL_FATAL,
+};
+```
+
+- 日志分级控制输出粒度，方便在开发、调试、发布阶段切换。
+
+- 内部判断：
+
+  ```c++
+  if (LOG_LEVEL_TRACE >= _level)
+      log(LOG_LEVEL_TRACE, ...);
+  ```
+
+- `_level` 控制最低输出级别。
+   例如：`_level = LOG_LEVEL_WARN` 时，只会输出 WARN / ERROR / FATAL。
+
+### (3) 宏与上下文捕获
+
+```c++
+#define LOG_WARN(...) \
+    __logger.warn(Logger::LogEntry{__LINE__, __FILE__, __func__}, __VA_ARGS__)
+```
+
+- 通过预定义宏 `__LINE__`, `__FILE__`, `__func__` 捕获调用点信息；
+- 将这些信息打包为 `LogEntry` 结构；
+- 通过 `__logger`（全局单例）直接输出日志。
+
+👉 **重点理解：**
+
+- 为什么使用宏？ → 自动补充上下文，避免手动传参；
+- 宏参数转发 `__VA_ARGS__`；
+- 最简单的单例（`extern Logger __logger`）。
+
+### (4) 多线程安全与锁
+
+```c++
+std::mutex _mutex;
+std::lock_guard<std::mutex> lock(_mutex);
+```
+
+- 每次写日志时加锁，防止多线程同时输出产生交叉。
+- 使用 RAII (`std::lock_guard`) 自动上锁与释放。
+
+👉 **重点理解：**
+
+- 为什么日志系统必须是线程安全的；
+- RAII 思想如何保证异常安全；
+- 可扩展方向：异步写日志、环形缓冲。
+
+### (5) 线程上下文信息
+
+`logger_ctx` 命名空间保存了：
+
+```c++
+thread_local int tid;
+thread_local std::string tid_string;
+thread_local std::string log_ctx_string;
+```
+
+- 使用 `thread_local` 为每个线程保存独立的日志上下文。
+- 日志中输出 `[pid:tid]` 格式，方便区分线程来源。
+
+👉 **重点理解：**
+
+- `thread_local` 的作用与生命周期；
+- 线程 ID 获取：`std::this_thread::get_id()`；
+- 日志上下文字符串的缓存机制。
+
+### (6) 时间戳的跨平台实现
+
+```c++
+#ifdef _USING_MSVC
+    GetSystemTimeAsFileTime(&ft);
+#else
+    ::gettimeofday(&tv, nullptr);
+#endif
+```
+
+- Windows 与 unix 系统的差异处理；
+- `gettimeofday` 获取微秒级时间；
+- 时间戳格式化时用 `gmtime_r` / `gmtime_s` 区分平台线程安全版本。
+
+👉 **重点理解：**
+
+- 平台条件编译 (`#ifdef`)；
+- `tm` 结构体与时间字符串格式化
