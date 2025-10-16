@@ -248,3 +248,225 @@ thread_local std::string log_ctx_string;
 
 - 平台条件编译 (`#ifdef`)；
 - `tm` 结构体与时间字符串格式化
+
+## 窗口
+
+### 什么是 GLFW
+
+> [GLFW（Graphics Library Framework）](https://www.glfw.org/)是一个专为 OpenGL / Vulkan 程序设计的轻量级库，用于创建窗口、管理输入、处理上下文。
+
+它的主要职责是：
+
+- 创建和管理 **窗口**；
+- 创建 **OpenGL 上下文**；
+- 处理 **键盘、鼠标、手柄输入事件**。
+
+### GLFW 与 OpenGL 的关系与区别
+
+GLFW **不负责图形渲染本身**，它只是提供图形上下文与事件系统，真正绘制图形的工作由 **OpenGL** 完成。
+
+| 对比项 | GLFW                         | OpenGL                                 |
+| ------ | ---------------------------- | -------------------------------------- |
+| 功能   | 创建窗口、输入管理、事件循环 | 渲染图形（绘制三角形、纹理、着色器等） |
+| 层级   | 系统层（操作系统 API 封装）  | GPU 层（显卡指令集标准）               |
+| 关系   | GLFW 创建一个“OpenGL 上下文” | OpenGL 在这个上下文中绘制内容          |
+| 替代品 | SDL、SFML、Win32 API、GLUT   | Vulkan、Metal、DirectX                 |
+
+#### 概念区分
+
+- **GLFW** → 管理“窗口”和“上下文”
+- **OpenGL** → 真正执行绘制命令
+
+一句话概括：
+
+> GLFW 打开一张纸，OpenGL 在上面画图。
+
+#### 运行时关系
+
+当执行：
+
+```c++
+glfwMakeContextCurrent(window);
+```
+
+时，GLFW 调用系统 API（如 `wglMakeCurrent` 或 `glXMakeCurrent`）在当前线程绑定 OpenGL 上下文。
+ 之后所有的 OpenGL 指令才会生效。
+
+### 关键 API
+
+| API                        | 作用               | 备注                                               |
+| -------------------------- | ------------------ | -------------------------------------------------- |
+| `glfwInit()`               | 初始化 GLFW        | 必须第一个调用，否则其他函数无效                   |
+| `glfwCreateWindow()`       | 创建窗口和上下文   | 第三个参数是窗口标题，后两个可用于多窗口共享上下文 |
+| `glfwMakeContextCurrent()` | 激活 OpenGL 上下文 | OpenGL 的所有绘制操作都在“当前上下文”中进行        |
+| `glfwWindowShouldClose()`  | 检测窗口是否被关闭 | 由用户关闭窗口或按 `ESC` 时触发                    |
+| `glfwSwapBuffers()`        | 交换前后帧缓冲区   | 将绘制完成的帧显示到屏幕                           |
+| `glfwPollEvents()`         | 处理输入与窗口事件 | 内部可能触发回调函数                               |
+| `glClear()`                | 清除上一帧内容     | 一般每帧调用一次                                   |
+
+### 窗口主循环
+
+主循环的逻辑：
+
+```c++
+while (!glfwWindowShouldClose(window)) {
+    // 渲染
+    glClear(GL_COLOR_BUFFER_BIT);
+    // 绘制指令
+    // ...
+    glfwSwapBuffers(window);
+    
+    // 处理窗口事件
+    glfwPollEvents();
+}
+```
+
+每一帧循环包含三步：
+
+1. **渲染内容**（`glClear` + 绘制）
+2. **显示帧缓冲**（`glfwSwapBuffers`）
+3. **处理输入事件**（`glfwPollEvents`）
+
+虽然程序一直在循环，但是CPU 占用率几乎为 0：
+
+`glfwSwapBuffers()` 通常会隐式调用 **垂直同步（VSync）**。VSync 让程序等待屏幕刷新（通常取决于显示器的刷新率），从而自动“限帧”；因此主循环实际是“被动等待”，而不是全速空转；如果禁用 VSync（通过 `glfwSwapInterval(0)`），你会看到 CPU 占用率瞬间升高。
+
+### GLFW 输入系统概览
+
+GLFW 提供两种输入处理方式：
+
+| 模式                     | 特点                             | 示例                                   | 适用场景                 |
+| ------------------------ | -------------------------------- | -------------------------------------- | ------------------------ |
+| **事件回调（Callback）** | 当用户触发输入时自动调用回调函数 | `glfwSetKeyCallback()`                 | GUI 程序、工具类应用     |
+| **主动轮询（Polling）**  | 每帧手动查询输入状态             | `glfwGetKey()`、`glfwGetMouseButton()` | 游戏、模拟器循环（推荐） |
+
+在游戏或模拟器中，我们通常使用 **轮询模式（Polling）**，因为：
+
+- 我们的主循环已经是固定帧率结构；
+- NES 输入本身也是“每帧查询手柄状态”；
+- 回调方式更复杂。
+
+```c++
+if (glfwGetKey(window, GLFW_KEY_A)) {
+	LOG_TRACE("A pressed");
+}
+```
+
+###  OpenGL 渲染
+
+#### 什么是“图元”？
+
+在 OpenGL 中，**所有可见的图像**都是由最基本的**几何单元（Primitive）**组成的，比如：
+
+| 图元类型       | 含义     | 示例用途                     |
+| -------------- | -------- | ---------------------------- |
+| `GL_POINTS`    | 绘制点   | 粒子效果                     |
+| `GL_LINES`     | 绘制线段 | 边框、网格                   |
+| `GL_TRIANGLES` | 三角形   | 所有现代 3D 图形的基本单位   |
+| `GL_QUADS`     | 四边形   | 适合 2D 画面显示（本例使用） |
+
+OpenGL 渲染时，其实并不懂“屏幕”或“图像”，它只是：
+
+1. 根据你提供的**顶点坐标（Vertex）**画出几何面；
+2. 用**纹理坐标（TexCoord）**决定每个像素在纹理中取什么颜色。
+
+> “NES 屏幕画面”其实就是贴在一个长方形上的一张图。 
+
+#### OpenGL 纹理
+
+> 相关接口：`glGenTextures` / `glBindTexture` / `glTexImage2D`
+
+- **纹理（Texture）** 是 GPU 上存储图像数据的显存资源；
+- 使用前必须：
+  1. `glGenTextures`：分配 ID；
+  2. `glBindTexture`：绑定为当前操作对象；
+  3. `glTexImage2D`：真正创建显存并上传数据；
+
+#### 纹理坐标与顶点坐标的关系
+
+在固定管线中，坐标空间分两种：
+
+| 类型                      | 范围        | 含义                         |
+| ------------------------- | ----------- | ---------------------------- |
+| 顶点坐标 (`glVertex2f`)   | -1.0 ~ +1.0 | 显示在屏幕上的位置（归一化） |
+| 纹理坐标 (`glTexCoord2f`) | 0.0 ~ 1.0   | 纹理图像的取样位置           |
+
+> 举例：
+>
+> - `(0,0)` → 纹理左下角
+> - `(1,1)` → 纹理右上角
+
+当我们调用：
+
+```c++
+glTexCoord2f(0.0f, 1.0f);
+glVertex2f(-1.0f, -1.0f);
+```
+
+这表示：
+
+> “把纹理左下角的像素贴到屏幕左下角的位置。”
+
+#### 纹理参数与最近点采样
+
+> 对应代码：
+>
+> ```c++
+> glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+> glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+> ```
+
+- NES 使用像素级渲染（没有插值），因此应使用 **最近点采样（Nearest）**；
+- 这样缩放后依然保持像素风格，不会出现模糊感。
+
+#### 随机数据生成（模拟帧缓冲）
+
+> 对应代码：
+>
+> ```c++
+> std::vector<short> random_data(256 * 240);
+> random_data[i] = engine() & 0xFFFF;
+> ```
+
+- 模拟一个“显存帧缓冲”；
+- NES 最终渲染时，这个数据会由 PPU 生成；
+- 使用随机数只是为了可视化。
+
+使用glTexSubImage2D函数将纹理数据推送到GPU。
+
+> 对应代码：
+>
+> ```c++
+> glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 240, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, random_data.data());
+> ```
+
+- 不需要重新创建纹理，只更新像素数据；
+- 参数说明：
+  - `GL_RGB`：每像素三通道；
+  - `GL_UNSIGNED_SHORT_5_6_5`：每像素16位，R5G6B5 格式；
+
+#### 视口与显示比例
+
+> ```c++
+> const float nes_aspect = 256.f / 240.f;
+> ...
+> if (aspect > nes_aspect) w_scale = nes_aspect / aspect;
+> else h_scale = aspect / nes_aspect;
+> ```
+
+- NES 分辨率比例 ≈ **1.0667 : 1**；
+- 我们要让画面始终居中显示，不被拉伸；
+- 根据窗口比例计算出缩放因子。
+
+glViewport 与坐标系统
+
+> ```c++
+> glViewport(0, 0, w, h);
+> glBegin(GL_QUADS);
+> ...
+> ```
+
+`glViewport` 决定 OpenGL 渲染的像素区域，一般简单为窗口长宽；
+
+
+
