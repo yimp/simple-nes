@@ -1,6 +1,6 @@
 # 1.程序架构设计
 
-## RetroArch 架构
+## 1.1 RetroArch 架构
 
 [RetroArch](https://www.retroarch.com/) 是一个多平台模拟器框架，它的设计理念非常值得参考：
 
@@ -32,7 +32,7 @@
 - **核心**：负责平台无关的部分（NES 硬件模拟逻辑）
 - **接口**：两者之间使用固定的数据结构通信，从而保证可移植性
 
-## 核心模块划分
+## 1.2 核心模块划分
 
 |               模块                |     功能     |               说明               |
 | :-------------------------------: | :----------: | :------------------------------: |
@@ -44,7 +44,7 @@
 |            **Mapper**             | 扩展存储控制 | 处理不同游戏的地址映射带切换逻辑 |
 |         **Emulator Core**         |   整体协调   | 负责时序同步、帧执行、状态保存等 |
 
-## 前端模块划分
+## 1.3 前端模块划分
 
 |    模块    |             功能              |
 | :--------: | :---------------------------: |
@@ -67,7 +67,7 @@
 
 这套环境兼顾了 **跨平台性、现代性、轻量级与实用性**，是目前实现模拟器类项目的理想方案。
 
-## CMake
+## 2.1 CMake
 
 [CMake](https://cmake.org/) 是一个跨平台的构建系统配置工具，它并不直接编译代码，而是生成适合目标平台的构建脚本（如 Ninja、Makefile、Visual Studio 工程等）。
 
@@ -81,7 +81,7 @@
 | **与 IDE 深度集成** |           VSCode、CLion、Visual Studio 都原生支持            |
 |  **自动依赖检测**   |        可轻松查找并链接外部库，如 SDL2、PortAudio 等         |
 
-## MinGW
+## 2.2 MinGW
 
 [MinGW-w64](https://www.mingw-w64.org/) 是 GCC 编译器在 Windows 平台的移植版，它提供：
 
@@ -102,7 +102,7 @@
 |     **支持 POSIX 标准**     |              可使用 pthread、stdint.h 等标准库               |
 |  **配合 Ninja 编译速度快**  |                    支持并行构建和增量编译                    |
 
-## VSCode
+## 2.3 VSCode
 
 [Visual Studio Code](https://code.visualstudio.com/) 是一个轻量级、模块化的编辑器，通过插件可以变身为功能完整的 C++ IDE。
 
@@ -118,7 +118,7 @@
 
 # 3.框架搭建
 
-## 日志模块
+## 3.1 日志模块
 
 在任何一个软件系统中，日志都是必不可少的。它帮助我们更直观的理解程序的运行途径，有时候比直接调试程序能更快的发现程序BUG。本系列将实现一个轻量级的日志器，在实现的过程中顺带讲解一些基础的c++知识。
 
@@ -249,9 +249,9 @@ thread_local std::string log_ctx_string;
 - 平台条件编译 (`#ifdef`)；
 - `tm` 结构体与时间字符串格式化
 
-## 窗口
+## 3.2 窗口
 
-### 什么是 GLFW
+### 3.2.1 什么是 GLFW
 
 > [GLFW（Graphics Library Framework）](https://www.glfw.org/)是一个专为 OpenGL / Vulkan 程序设计的轻量级库，用于创建窗口、管理输入、处理上下文。
 
@@ -261,7 +261,7 @@ thread_local std::string log_ctx_string;
 - 创建 **OpenGL 上下文**；
 - 处理 **键盘、鼠标、手柄输入事件**。
 
-### GLFW 与 OpenGL 的关系与区别
+### 3.2.2 GLFW 与 OpenGL 的关系与区别
 
 GLFW **不负责图形渲染本身**，它只是提供图形上下文与事件系统，真正绘制图形的工作由 **OpenGL** 完成。
 
@@ -292,7 +292,7 @@ glfwMakeContextCurrent(window);
 时，GLFW 调用系统 API（如 `wglMakeCurrent` 或 `glXMakeCurrent`）在当前线程绑定 OpenGL 上下文。
  之后所有的 OpenGL 指令才会生效。
 
-### 关键 API
+### 3.2.3 关键 API
 
 | API                        | 作用               | 备注                                               |
 | -------------------------- | ------------------ | -------------------------------------------------- |
@@ -304,7 +304,7 @@ glfwMakeContextCurrent(window);
 | `glfwPollEvents()`         | 处理输入与窗口事件 | 内部可能触发回调函数                               |
 | `glClear()`                | 清除上一帧内容     | 一般每帧调用一次                                   |
 
-### 窗口主循环
+### 3.2.4 窗口主循环
 
 主循环的逻辑：
 
@@ -331,7 +331,7 @@ while (!glfwWindowShouldClose(window)) {
 
 `glfwSwapBuffers()` 通常会隐式调用 **垂直同步（VSync）**。VSync 让程序等待屏幕刷新（通常取决于显示器的刷新率），从而自动“限帧”；因此主循环实际是“被动等待”，而不是全速空转；如果禁用 VSync（通过 `glfwSwapInterval(0)`），你会看到 CPU 占用率瞬间升高。
 
-### GLFW 输入系统概览
+### 3.2.5 GLFW 输入系统概览
 
 GLFW 提供两种输入处理方式：
 
@@ -352,7 +352,7 @@ if (glfwGetKey(window, GLFW_KEY_A)) {
 }
 ```
 
-###  OpenGL 渲染
+###  3.2.6 OpenGL 渲染
 
 #### 什么是“图元”？
 
@@ -468,5 +468,118 @@ glViewport 与坐标系统
 
 `glViewport` 决定 OpenGL 渲染的像素区域，一般简单为窗口长宽；
 
+## 3.3 libretro框架搭建
 
+> libretro预声明好一组接口，用于我们实现前端跟核心之间的交互逻辑。
 
+### 3.3.1 认识 libretro
+
+我们首先从官方仓库下载头文件：
+
+🔗 https://raw.githubusercontent.com/libretro/RetroArch/refs/heads/master/libretro-common/include/libretro.h
+
+> 💡 这个文件定义了所有 **Libretro Core（核心）** 与 **前端（Frontend）** 通信所需的接口、回调与常量。
+
+#### 什么是 Libretro？
+
+Libretro 是一个**模拟器插件接口标准**。
+ 它把“模拟器核心”（Core）与“图形前端”（Frontend）分离，使得同一核心可以在不同前端中运行。
+
+| 角色         | 功能                 | 举例                               |
+| ------------ | -------------------- | ---------------------------------- |
+| **Frontend** | 管理窗口、音频、输入 | RetroArch、BizHawk、你自己的程序   |
+| **Core**     | 实际模拟游戏逻辑     | FCEUmm、Snes9x、mGBA、你的自制核心 |
+
+> 🧩 简而言之：
+>  Frontend 负责“跑环境”，Core 负责“跑游戏”。
+
+#### 关键结构与函数
+
+在 `libretro.h` 中最重要的是一组接口函数（需要在Core中 实现）：
+
+```c++
+void retro_init(); // 用于执行一些初始化工作
+void retro_run();  // 用于实现模拟逻辑，一般由前端程序每帧调用一次 
+bool retro_load_game(); // 用于实现游戏加载的逻辑
+void retro_reset(); // 用于实现重启游戏的逻辑
+void retro_set_xxx(); // 用于注册各种回调
+```
+
+以及一组“回调函数”接口（Frontend 实现并注册给 Core）：
+
+```c++
+retro_video_refresh_t video_cb;
+retro_audio_sample_t audio_cb;
+retro_input_poll_t input_poll_cb;
+```
+
+> 这两组函数构成了 Core 与 Frontend 之间的“双向通信通道”。
+
+### 3.3.2 前端使用 Libretro 的基本流程
+
+一个前端要正确加载并运行 Core，通常需要以下步骤：
+
+| 步骤                       | 内容                                   |
+| -------------------------- | -------------------------------------- |
+| 1️⃣ 加载核心动态库           | `dlopen("core.dll")` / `LoadLibrary()` |
+| 2️⃣ 解析接口函数             | `dlsym()` 获取 `retro_init` 等函数指针 |
+| 3️⃣ 设置回调函数             | `retro_set_video_refresh()` 等         |
+| 4️⃣ 调用 `retro_load_game()` | 传入 ROM 文件路径（或者ROM数据）       |
+| 5️⃣ 主循环调用 `retro_run()` | 执行每帧模拟逻辑与渲染                 |
+| 6️⃣ 关闭核心                 | ``dlclose("core.dll")`                 |
+
+> 💡 这其实就是 RetroArch 的基本框架，本项目仅通过静态链接核心来实现一个极简版本。
+
+**实现封装类 `SimpleRetro`**
+
+用一个 C++ 单例类封装所有 libretro 交互，方便前端使用。
+
+核心功能：
+
+1. **构造函数**
+   - 解析命令行参数，加载 ROM 文件；
+   - 初始化 libretro Core；
+   - 注册回调（视频、输入、音频等）。
+2. **`setVideoRefresh()`**
+   - 设置前端视频回调接口；
+   - 内部保存函数指针，供 Core 调用。
+3. **`run()`**
+   - 主循环：调用 `retro_run()`；
+   - 每帧 Core 会调用 `video_refresh()` 输出画面。
+4. **`video_refresh()`（静态函数）**
+   - 作为 libretro 的视频回调适配器；
+   - 转发到前端提供的函数，用 GLFW 显示图像。
+
+这个类充当一个框架的作用，后面随着进度推进，会逐步扩展这个类。
+
+### 3.3.3 在Core中实现libretro
+
+Core 需要实现 `libretro.h` 中的所有标准函数。
+ 下面是一个最小可运行的示例（不包含任何真实模拟逻辑）：
+
+```c++
+#include "libretro.h"
+#include <string.h>
+
+static retro_video_refresh_t video_cb = nullptr;
+
+void retro_init(void) {}
+void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
+
+bool retro_load_game(const struct retro_game_info *game)
+{
+    // 打印游戏信息
+    printf("Loaded game: %s (%zu bytes)\n", game->path, game->size);
+    return true;
+}
+void retro_run(void)
+{
+    static uint32_t dummy_frame[256 * 240];
+    memset(dummy_frame, 0x80, sizeof(dummy_frame)); // 灰色背景
+    if (video_cb)
+        video_cb(dummy_frame, 256, 240, 256 * 4);
+}
+void retro_reset(void) {}
+```
+
+> 💡 这段代码每帧都会输出一张灰色图像到前端，说明整个调用链已经成功建立。

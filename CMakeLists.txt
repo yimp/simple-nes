@@ -7,5 +7,11 @@ elseif(CMAKE_GENERATOR MATCHES "MinGW Makefiles")
     add_definitions(-D_USING_MINGW)
 endif()
 
+# third
 add_subdirectory(third/glfw)
+
+# core
+add_subdirectory(core)
+
+# frontend
 add_subdirectory(frontend/windows-frontend)

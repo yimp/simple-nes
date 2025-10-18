@@ -1,4 +1,5 @@
 #include "logging.h"
+#include "simple_retro.h"
 #include <GLFW/glfw3.h>
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -8,31 +9,9 @@ void error_callback(int error_code, const char* description)
     LOG_ERROR("error:%d, msg:%s", error_code, description);
 }
 
-void render0()
-{
-    glClearColor(0.2f, 0.2f, 0.4f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glBegin(GL_TRIANGLES);
-    glColor3f(1.0f, 0.0f, 0.0f); glVertex2f(-0.6f, -0.4f);
-    glColor3f(0.0f, 1.0f, 0.0f); glVertex2f( 0.6f,  0.4f);
-    glColor3f(0.0f, 0.0f, 1.0f); glVertex2f( 0.0f,  0.6f);
-    glEnd();
-}
-
-void render1()
-{
-    glClearColor(0.2f, 0.2f, 0.4f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glBegin(GL_QUADS);
-    glColor3f(1.0f, 0.0f, 0.0f); glVertex2f(-1.0f, -1.0f);
-    glColor3f(0.0f, 0.0f, 1.0f); glVertex2f( 1.0f, -1.0f);
-    glColor3f(0.0f, 1.0f, 0.0f); glVertex2f( 1.0f,  1.0f);
-    glColor3f(0.0f, 0.0f, 1.0f); glVertex2f(-1.0f,  1.0f);
-    glEnd();
-}
 
 #include <random>
-void update_texture()
+void update_texture(const void *data, unsigned width, unsigned height, size_t pitch)
 {
     static GLuint texture = -1;
     if (texture == -1)
@@ -44,25 +23,19 @@ void update_texture()
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     }
 
-    static std::vector<short> random_data(256 * 240);
-    {
-        static std::default_random_engine engine;
-        for (int i = 0; i < random_data.size(); i++)
-        {
-            random_data[i] = engine() & 1 ? 0x0000 : 0xFFFF;
-        }
-    }
-
     // r,g,b
     // 5(0-31), 6(0-63), 5(0-31)
     glBindTexture(GL_TEXTURE_2D, texture);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 256);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 240, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, random_data.data());
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 240, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, data);
     glEnable(GL_TEXTURE_2D);
 }
 
-void render(int w, int h)
+void render(GLFWwindow* glfw, const void *data, unsigned width, unsigned height, size_t pitch)
 {
+    int w, h;
+    glfwGetFramebufferSize(glfw, &w, &h);
+
     const float nes_aspect = 256.0f / 240.0f;
     float aspect = (float)w / (float)h;
 
@@ -79,7 +52,7 @@ void render(int w, int h)
     glClear(GL_COLOR_BUFFER_BIT);
     glViewport(0, 0, w, h);
 
-    update_texture();
+    update_texture(data, width, height, pitch);
     glBegin(GL_QUADS);
     glTexCoord2f(0.0f, 1.0f); glVertex2f(-w_scale, -h_scale);
     glTexCoord2f(1.0f, 1.0f); glVertex2f( w_scale, -h_scale);
@@ -100,15 +73,18 @@ int main(int argc, char** argv)
     glfwInit();
     glfwSetErrorCallback(error_callback);
     GLFWwindow* window = glfwCreateWindow(256, 240, "simple-nes", nullptr, nullptr);
-    glfwSwapInterval(1);
     glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
 
+    SimpleRetro retro(window, argc, argv);
+    retro.setVideoRefresh(render);
+    retro.reset();
     int w, h;
     while (!glfwWindowShouldClose(window))
     {
         // render
         glfwGetFramebufferSize(window, &w, &h);
-        render(w, h);
+        retro.run();
         glfwSwapBuffers(window);
 
         // events
