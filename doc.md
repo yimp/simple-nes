@@ -583,3 +583,803 @@ void retro_reset(void) {}
 ```
 
 > 💡 这段代码每帧都会输出一张灰色图像到前端，说明整个调用链已经成功建立。
+
+# 4.CPU模拟
+
+## 4.1 硬件概述
+
+- **型号**：Ricoh 2A03（北美 NES）或 Ricoh 2A07（欧洲 PAL NES）
+- 这两款芯片均基于 **MOS 6502** 架构，但有以下差异：
+  - **去掉了 BCD（十进制模式）指令支持**；
+  - **集成了 APU（音频处理单元）**；
+  - 时钟频率略有差异：
+    - NTSC（2A03）：约 1.79 MHz
+    - PAL（2A07）：约 1.66 MHz
+
+NES 的 CPU 是一颗 **8 位处理器**，但可以寻址 **16 位地址空间（64KB）**。
+
+2A03 的主要寄存器如下：
+
+| 名称   | 位宽  | 含义                                                |
+| ------ | ----- | --------------------------------------------------- |
+| **A**  | 8 位  | 累加器（Accumulator），用于算术和逻辑操作           |
+| **X**  | 8 位  | 索引寄存器 X，用于偏移寻址                          |
+| **Y**  | 8 位  | 索引寄存器 Y，用于偏移寻址                          |
+| **PC** | 16 位 | 程序计数器（Program Counter），存储下一条指令的地址 |
+| **SP** | 8 位  | 栈指针（Stack Pointer），指向 $0100–$01FF 的栈区    |
+| **P**  | 8 位  | 状态寄存器（Processor Status）                      |
+
+状态寄存器的各位含义如下：
+
+| 位   | 名称              | 标志 | 说明                         |
+| ---- | ----------------- | ---- | ---------------------------- |
+| 7    | Negative          | N    | 运算结果为负                 |
+| 6    | Overflow          | V    | 溢出                         |
+| 5    | (unused)          | —    | 保持为 1                     |
+| 4    | Break             | B    | 表示 BRK 指令执行            |
+| 3    | Decimal           | D    | 十进制模式（在 2A03 中无效） |
+| 2    | Interrupt Disable | I    | 禁止中断                     |
+| 1    | Zero              | Z    | 运算结果为 0                 |
+| 0    | Carry             | C    | 进位/借位                    |
+
+## 4.2 CPU总线模型
+
+NES 的 CPU 是一个独立的逻辑单元，本身**不直接知道外部设备的存在**。
+ CPU 对外的唯一接口是三条总线：
+
+1. **地址总线（Address Bus, 16 位）**
+   - 输出信号，CPU 用它指定访问的内存或外设地址（$0000–$FFFF）。
+2. **数据总线（Data Bus, 8 位）**
+   - 双向信号线，用于数据读写。
+3. **控制信号线**
+   - 如 `R/W`（读/写控制）、`IRQ`、`NMI`、`RESET` 等。
+
+> 在模拟中，CPU 本身只负责：
+>
+> - 发出 “我要访问地址 $XXXX”；
+> - 读取或写入一个字节；
+> - 外部由“总线逻辑”决定这个地址映射到哪（RAM、PPU 寄存器、APU 寄存器或 PRG ROM）。
+
+在模拟器实现中，通常会把“总线”抽象为一组接口，例如：
+
+```c
+uint8_t bus_read(uint16_t addr); 			// 模拟cpu通过总线从外部单元读区数据
+void bus_write(uint16_t addr, uint8_t data); // 模拟cpu通过总线向外部单元写数据
+```
+
+这样即可让 CPU 模拟逻辑自然地反映硬件结构。CPU 在执行指令时不直接访问内存，而是通过 `bus_read()` / `bus_write()` 来与外部通信。
+
+## 4.3 指令执行基本流程
+
+### 4.3.1 6502 的三阶段执行模型
+
+一条指令通常分为三个阶段：
+
+1. **取指（Fetch）**
+   - 从程序计数器（PC）指向的地址取出操作码（opcode）。
+   - PC 自动递增。
+2. **寻址（Decode / Addressing）**
+   - 根据操作码确定该指令的寻址方式（立即数、零页、绝对、间接、索引等）。
+   - 从操作数中计算出有效地址（Effective Address）。
+3. **执行（Execute）**
+   - 对操作数执行指令对应的功能（算术、逻辑、跳转、读写等）。
+   - 更新寄存器、标志位、PC 等状态。
+
+------
+
+### 4.3.2  举例：`LDA $C000` 的执行过程
+
+假设内存 $C000 存放了一个字节 0x42。
+
+1. **取指**
+   - PC 指向 $8000，CPU 从总线读取指令码：`LDA Absolute` → 操作码 `$AD`
+   - PC 递增 1
+2. **寻址**
+   - CPU 再连续读取两个字节作为地址低高位：`00 C0` → 地址 $C000
+   - PC 递增 2
+3. **执行**
+   - CPU 通过总线读取 $C000 的内容（0x42）到 A 寄存器
+   - 更新 Zero/Negative 标志
+   - 指令结束，等待下一条取指
+
+## 4.4 寻址模式详解（12 种）
+
+### 1) IMP — Implied（隐含寻址）
+
+- **含义**：操作数隐含在指令或寄存器中，不需额外字节。
+
+- **机器码字节数**：0（只有 opcode）
+
+- **如何执行**：指令本身决定作用对象（如 `CLC`，`INX`，`BRK` 的行为不同）。
+
+- **示例**：`INX`（使 X 寄存器加 1）
+
+- **实现提示（伪码）**：
+
+  ```cpp
+  // 已经取到 opcode，直接调用对应操作函数
+  CPU::INX() { X = (X + 1) & 0xFF; setZN(X); }
+  ```
+
+- **备注**：没有内存有效地址计算。
+
+------
+
+### 2) IMM — Immediate（立即数）
+
+- **含义**：操作数是紧随 opcode 的一个字节，直接作为数据使用。
+
+- **机器码字节数**：1（操作码后跟 1 字节）
+
+- **有效地址**：没有“地址”，而是立即值 `value = bus.read(PC++)`
+
+- **示例**：`LDA #$42` （把 0x42 载入 A）
+
+- **伪码**：
+
+  ```cpp
+  uint8_t operand = bus.read(PC++);
+  A = operand;
+  setZN(A);
+  ```
+
+- **备注**：没有页面穿越惩罚。
+
+------
+
+### 3) ZP0 — Zero Page（零页）
+
+- **含义**：操作数是一个 8 位地址（位于 $0000–$00FF），访问速度较快（6502 专门优化）。
+
+- **机器码字节数**：1（后跟 1 字节的零页地址）
+
+- **有效地址计算**：
+
+  1. `addr = bus.read(PC++)`  （0x00–0xFF）
+  2. 实际访问地址为 `0x00XX`（高字节 0）
+
+- **示例**：`LDA $10` （从 $0010 读）
+
+- **伪码**：
+
+  ```cpp
+  uint8_t zp = bus.read(PC++);
+  uint16_t addr = zp; // implicit 0x00 high byte
+  A = bus.read(addr);
+  setZN(A);
+  ```
+
+- **备注**：如果实现使用数组（size 256）对零页直接访问会更简单。
+
+------
+
+### 4) ZPX — Zero Page, X（零页,X）
+
+- **含义**：在零页地址上加 X（结果在零页范围内，按 8 位溢出，即 0xFF + 1 -> 0x00）。
+
+- **字节数**：1
+
+- **有效地址计算**：
+
+  1. `zp = bus.read(PC++)`
+  2. `addr = (zp + X) & 0xFF`（仅低 8 位，零页环绕）
+  3. 访问 `0x00XX`
+
+- **示例**：`STA $80,X`（把 A 存到 $0080 + X）
+
+- **伪码**：
+
+  ```cpp
+  uint8_t zp = bus.read(PC++);
+  uint16_t addr = (uint8_t)(zp + X); // wrap in zero page
+  bus.write(addr, A);
+  ```
+
+- **注意**：**零页环绕**是重要行为 —— 加法只保留低 8 位。
+
+------
+
+### 5) ZPY — Zero Page, Y（零页,Y）
+
+- **含义**：同 ZPX，但用 Y 寄存器做偏移。
+- **字节数**：1
+- **有效地址计算**：
+  - `addr = (bus.read(PC++) + Y) & 0xFF`
+- **示例**：`LDA $20,Y`
+- **伪码** 与 ZPX 类似，只替换 X 为 Y。
+
+------
+
+### 6) REL — Relative（相对，主要用于分支）
+
+- **含义**：用于分支指令（`BEQ`, `BNE`, `BCS`, `BCC` 等），操作数是带符号的 8 位偏移（-128..+127），相对于分支指令后的下一个地址（PC 已指向下一字节）。
+
+- **字节数**：1（带符号偏移）
+
+- **地址计算**：
+
+  1. `offset = (int8_t)bus.read(PC++)` （把 8 位看成有符号）
+  2. 如果条件满足：`target = PC + offset`（`PC` 此处为指向偏移字节后的位置）
+
+- **周期与惩罚**：
+
+  - 如果分支**不成立**：只消耗基础周期（通常 2）。
+  - 如果**成立**：+1 个周期；
+  - 如果分支目标与 `PC` 在不同页（高字节不同），再 +1 个周期（即总共可能多 +2）。
+
+- **示例**：`BEQ label`（当 Z=1 时分支）
+
+- **伪码**：
+
+  ```cpp
+  int8_t rel = (int8_t)bus.read(PC++);
+  if (condition) {
+      uint16_t oldPC = PC;
+      PC += rel;
+      cycles += 1;
+      if ((oldPC & 0xFF00) != (PC & 0xFF00)) cycles += 1;
+  }
+  ```
+
+------
+
+### 7) ABS — Absolute（绝对）
+
+- **含义**：操作数是 16 位绝对地址（两字节：低字节先，高字节后）。
+
+- **字节数**：2
+
+- **有效地址计算**：
+
+  1. `lo = bus.read(PC++)`
+  2. `hi = bus.read(PC++)`
+  3. `addr = (hi << 8) | lo`
+
+- **示例**：`LDA $C000`
+
+- **伪码**：
+
+  ```cpp
+  uint16_t lo = bus.read(PC++);
+  uint16_t hi = bus.read(PC++);
+  uint16_t addr = (hi << 8) | lo;
+  A = bus.read(addr);
+  setZN(A);
+  ```
+
+- **备注**：没有零页环绕或特殊 bug。
+
+------
+
+### 8) ABX — Absolute, X（绝对,X）
+
+- **含义**：从绝对地址加上 X 寄存器得到最终地址：`addr = base + X`。
+
+- **字节数**：2
+
+- **有效地址计算**：
+
+  1. 读取 16 位基地址 `base`（同 ABS）
+  2. `addr = base + X`
+
+- **周期惩罚**：
+
+  - 如果 `base` 与 `addr` 跨页（即 `(base & 0xFF00) != (addr & 0xFF00)`），某些指令会额外消耗 1 个周期（常见于读内存的指令，如 LDA）。对于写入指令（STA）并不会有额外周期（因为 STA 在计算地址时通常已经完成写入步骤，但实现细节视表格而定）。
+
+- **示例**：`LDA $2000,X`
+
+- **伪码**：
+
+  ```cpp
+  uint16_t base = bus.read(PC++) | (bus.read(PC++) << 8);
+  uint16_t addr = base + X;
+  // if page crossed, cycles++
+  A = bus.read(addr);
+  setZN(A);
+  ```
+
+------
+
+### 9) ABY — Absolute, Y（绝对,Y）
+
+- **含义**：与 ABX 类似，但用 Y 寄存器偏移。
+- **字节数**：2
+- **行为**：与 ABX 完全对应（也同样会在读类指令时因为跨页而 +1 周期）。
+- **示例**：`LDA $4000,Y`
+
+### 10) IND — Indirect（间接，主要用于 JMP (ind)）
+
+- **含义**：操作数给出一个指针（16 位），CPU 从该指针位置读取真实的跳转地址（JMP (addr)）。
+
+- **字节数**：2
+
+- **地址计算**：
+
+  1. 读取 `ptr_lo = bus.read(PC++)`、`ptr_hi = bus.read(PC++)` ⇒ `ptr = (ptr_hi << 8) | ptr_lo`
+  2. **标准想法**：`target = read16(ptr)`（读 ptr 与 ptr+1 的两个字节）
+
+- **6502 特殊 bug（必须在 NES 模拟器中复现）**：
+
+  - 如果 `ptr_lo == 0xFF`（即指针位于页面末尾，例如 `$02FF`），硬件会把高字节从同一页面的地址 `$0200` 读取（而不是 `$0300`）。换言之，高字节读取会发生**页面边界回绕**，即：
+    - `low = bus.read(ptr)`
+    - `high = bus.read(ptr & 0xFF00)` （而不是 `ptr + 1`）
+  - 这个 bug 只影响 `JMP (addr)` 的间接寻址，模拟器常被要求**精确模拟**这个行为以确保兼容性（部分游戏利用这个 bug）。
+
+- **示例**：`JMP ($C000)`（跳转到存储在 $C000/$C001 的地址）
+
+- **伪码（含 bug 复现）**：
+
+  ```cpp
+  uint16_t ptr = bus.read(PC++) | (bus.read(PC++) << 8);
+  uint8_t lo = bus.read(ptr);
+  uint8_t hi;
+  if ((ptr & 0x00FF) == 0x00FF) {
+      // 6502 bug: high byte fetched from beginning of same page
+      hi = bus.read(ptr & 0xFF00);
+  } else {
+      hi = bus.read(ptr + 1);
+  }
+  uint16_t target = (hi << 8) | lo;
+  PC = target;
+  ```
+
+------
+
+### 11) IZX — Indexed Indirect (Zero Page, X)（零页索引间接，常写为 (zp,X)）
+
+- **含义**：先将零页地址与 X 相加（零页内环绕），结果是指向 16 位地址指针的零页位置；再从该指针读取低/高字节得到最终地址，最后对该地址进行内存访问。
+
+- **机器码字节数**：1（零页地址）
+
+- **有效地址计算（step-by-step）**：
+
+  1. `zp = bus.read(PC++)`
+  2. `ptr = (zp + X) & 0xFF`  （**零页环绕**）
+  3. `lo = bus.read(ptr)`
+  4. `hi = bus.read((ptr + 1) & 0xFF)`  （读取高字节也在零页内环绕）
+  5. `addr = (hi << 8) | lo`
+
+- **示例**：`LDA ($20,X)`：先在零页地址 `$20 + X` 处读指针，再从指针地址读取数据到 A。
+
+- **伪码**：
+
+  ```cpp
+  uint8_t zp = bus.read(PC++);
+  uint8_t ptr = (uint8_t)(zp + X); // wrap in zero page
+  uint16_t lo = bus.read(ptr);
+  uint16_t hi = bus.read((uint8_t)(ptr + 1));
+  uint16_t addr = (hi << 8) | lo;
+  A = bus.read(addr);
+  setZN(A);
+  ```
+
+- **备注**：页面穿越惩罚 **不适用**，因为最后的 `addr` 是完整地址，任何由基址计算产生的跨页并不产生额外周期（这是 IZX 的常见特点）。
+
+------
+
+### 12) IZY — Indirect Indexed (Zero Page, Y)（零页间接索引，常写为 (zp),Y）
+
+- **含义**：先从零页指针读取 16 位基址（低/高字节），然后把 Y 加到该基址上得到最终地址（这一步可能跨页）。
+
+- **机器码字节数**：1
+
+- **有效地址计算**：
+
+  1. `zp = bus.read(PC++)`
+  2. `lo = bus.read(zp)` （零页读）
+  3. `hi = bus.read((zp + 1) & 0xFF)` （零页环绕读高字节）
+  4. `base = (hi << 8) | lo`
+  5. `addr = base + Y`
+
+- **周期惩罚**：
+
+  - 如果 `base` 与 `addr` 跨页（`(base & 0xFF00) != (addr & 0xFF00)`），某些指令会多花 1 个周期（例如 `LDA ($20),Y` 在跨页时 +1）。
+
+- **示例**：`LDA ($30),Y`
+
+- **伪码**：
+
+  ```cpp
+  uint8_t zp = bus.read(PC++);
+  uint16_t lo = bus.read(zp);
+  uint16_t hi = bus.read((uint8_t)(zp + 1));
+  uint16_t base = (hi << 8) | lo;
+  uint16_t addr = base + Y;
+  // if page crossed, cycles++
+  A = bus.read(addr);
+  setZN(A);
+  ```
+
+------
+
+### 汇总（简短表格）
+
+| 模式 | 字节数 | 基本描述             | 零页环绕          | 页穿越惩罚                  | 典型用途          |
+| ---- | ------ | -------------------- | ----------------- | --------------------------- | ----------------- |
+| IMP  | 0      | 隐含（寄存器/内部）  | —                 | —                           | 控制/堆栈/标志类  |
+| IMM  | 1      | 立即数               | —                 | —                           | 立刻用值（LDA #） |
+| ZP0  | 1      | 零页直接             | —                 | —                           | 快速内存访问      |
+| ZPX  | 1      | 零页 + X（8 位环绕） | ✅                 | —                           | 表/数组索引       |
+| ZPY  | 1      | 零页 + Y（8 位环绕） | ✅                 | —                           | 同上              |
+| REL  | 1      | 分支，相对（带符号） | —                 | ✅（分支成立 + 页跨越再 +1） | BEQ/BNE 等        |
+| ABS  | 2      | 16 位地址            | —                 | —                           | 直接读写内存      |
+| ABX  | 2      | ABS + X              | —                 | ✅（读类指令）               | 访问数组          |
+| ABY  | 2      | ABS + Y              | —                 | ✅（读类指令）               | 访问数组          |
+| IND  | 2      | JMP (ptr) — 间接     | 某种边界 bug      | —（但有特殊 bug）           | JMP 指针跳转      |
+| IZX  | 1      | (zp,X)：零页索引间接 | ✅（指针读取环绕） | —                           | 间接寻址          |
+| IZY  | 1      | (zp),Y：零页间接 + Y | ✅（指针读取环绕） | ✅（基址+Y 跨页）            | 间接寻址          |
+
+## 4.5 6502指令集
+
+本节将详细说明 NES（Ricoh 2A03）CPU 支持的主要指令。
+ 每个类别先介绍通用行为与标志位影响，然后选取代表性指令展开说明。
+
+------
+
+### 1) Access
+
+> 访问类：LDA、STA、LDX、STX、LDY、STY
+
+**功能说明**
+
+- `LDx`（Load）指令：将内存内容载入寄存器；
+- `STx`（Store）指令：将寄存器内容存入内存。
+
+| 指令    | 功能            | 影响标志 |
+| ------- | --------------- | -------- |
+| **LDA** | 内存 → 累加器 A | Z, N     |
+| **LDX** | 内存 → X 寄存器 | Z, N     |
+| **LDY** | 内存 → Y 寄存器 | Z, N     |
+| **STA** | 累加器 A → 内存 | 无       |
+| **STX** | X 寄存器 → 内存 | 无       |
+| **STY** | Y 寄存器 → 内存 | 无       |
+
+**示例：LDA**
+
+```cpp
+void CPU::LDA() {
+    A = fetched;      // fetched = 由寻址模式确定的值
+    setFlag(Z, A == 0);
+    setFlag(N, A & 0x80);
+}
+```
+
+> `LDX`、`LDY` 实现类似，只是目标寄存器不同。
+
+### 2) Transfer
+
+> 传送类：TAX、TXA、TAY、TYA
+
+**功能说明**
+
+- 这些指令在寄存器之间传送数据，不访问内存。
+- 全部会影响 Z/N 标志。
+
+| 指令    | 功能  | 影响标志 |
+| ------- | ----- | -------- |
+| **TAX** | A → X | Z, N     |
+| **TXA** | X → A | Z, N     |
+| **TAY** | A → Y | Z, N     |
+| **TYA** | Y → A | Z, N     |
+
+**示例：TAX**
+
+```cpp
+void CPU::TAX() {
+    X = A;
+    setFlag(Z, X == 0);
+    setFlag(N, X & 0x80);
+}
+```
+
+------
+
+### 2) Arithmetic
+
+> 算术类：ADC、SBC、INC、DEC、INX、DEX、INY、DEY
+
+**功能说明**
+
+- 算术类指令执行加减或自增自减操作；
+- 所有算术操作都会影响 Z、N、C、V（视情况）标志。
+
+------
+
+**✅ ADC（Add with Carry）**
+
+执行：`A = A + M + C`
+
+| 标志 | 含义                        |
+| ---- | --------------------------- |
+| C    | 进位（结果超过 255 时设 1） |
+| V    | 溢出（符号位异常变化）      |
+| Z    | 结果为 0                    |
+| N    | 结果为负                    |
+
+```cpp
+void CPU::ADC() {
+    uint16_t sum = A + fetched + getFlag(C);
+    setFlag(C, sum > 0xFF);
+    setFlag(Z, (sum & 0xFF) == 0);
+    setFlag(V, (~(A ^ fetched) & (A ^ sum) & 0x80));
+    setFlag(N, sum & 0x80);
+    A = sum & 0xFF;
+}
+```
+
+------
+
+**✅ SBC（Subtract with Carry）**
+
+6502 的减法通过补码加法实现：
+ `A = A - M - (1 - C)` ≡ `A + (~M) + C`
+
+```cpp
+void CPU::SBC() {
+    uint16_t value = fetched ^ 0xFF;
+    uint16_t sum = A + value + getFlag(C);
+    setFlag(C, sum > 0xFF);
+    setFlag(Z, (sum & 0xFF) == 0);
+    setFlag(V, (sum ^ A) & (sum ^ value) & 0x80);
+    setFlag(N, sum & 0x80);
+    A = sum & 0xFF;
+}
+```
+
+------
+
+**✅ INC / DEC（内存自增自减）**
+
+```cpp
+void CPU::INC() {
+    uint8_t v = bus.read(addr_abs) + 1;
+    bus.write(addr_abs, v);
+    setFlag(Z, v == 0);
+    setFlag(N, v & 0x80);
+}
+```
+
+`DEC` 逻辑相同但减 1。
+
+------
+
+**✅ INX / DEX / INY / DEY（寄存器自增自减）**
+
+```cpp
+void CPU::INX() { X++; setFlag(Z, X == 0); setFlag(N, X & 0x80); }
+void CPU::DEX() { X--; setFlag(Z, X == 0); setFlag(N, X & 0x80); }
+```
+
+------
+
+### 4) Shift
+
+> 移位类：ASL、LSR、ROL、ROR
+
+**功能说明**
+
+- 对寄存器或内存内容执行逻辑移位。
+- 通常影响 C、Z、N 标志。
+
+| 指令    | 操作             | C 标志                           | 说明         |
+| ------- | ---------------- | -------------------------------- | ------------ |
+| **ASL** | 左移一位         | 移出的最高位                     | 乘 2         |
+| **LSR** | 右移一位         | 移出的最低位                     | 除 2（逻辑） |
+| **ROL** | 循环左移，含进位 | 原最高位进 Carry，Carry 入最低位 |              |
+| **ROR** | 循环右移，含进位 | 原最低位进 Carry，Carry 入最高位 |              |
+
+**示例：ASL**
+
+```cpp
+void CPU::ASL() {
+    uint16_t res = (uint16_t)fetched << 1;
+    setFlag(C, res & 0x100);
+    setFlag(Z, (res & 0xFF) == 0);
+    setFlag(N, res & 0x80);
+    write(addr_abs, res & 0xFF);
+}
+```
+
+------
+
+### 5) Bitwise
+
+> 按位操作类：AND、ORA、EOR、BIT
+
+| 指令    | 操作             | 影响标志          |
+| ------- | ---------------- | ----------------- |
+| **AND** | `A = A & M`      | Z, N              |
+| **ORA** | `A = A      | M` |                   |
+| **EOR** | `A = A ^ M`      | Z, N              |
+| **BIT** | 特殊测试位       | Z, N=bit7, V=bit6 |
+
+**示例：BIT**
+
+```cpp
+void CPU::BIT() {
+    uint8_t v = bus.read(addr_abs);
+    setFlag(Z, (A & v) == 0);
+    setFlag(N, v & 0x80);
+    setFlag(V, v & 0x40);
+}
+```
+
+------
+
+### 6) Compare
+
+> 比较类：CMP、CPX、CPY
+
+- 比较实质是执行 `A - M`（或 `X - M`、`Y - M`）但不保存结果；
+- 影响标志：C, Z, N。
+
+```cpp
+void CPU::CMP() {
+    uint16_t tmp = A - fetched;
+    setFlag(C, A >= fetched);
+    setFlag(Z, (tmp & 0xFF) == 0);
+    setFlag(N, tmp & 0x80);
+}
+```
+
+`CPX` / `CPY` 同理。
+
+------
+
+### 7) Branch
+
+> 分支类：BCC、BCS、BEQ、BNE、BPL、BMI、BVC、BVS
+
+- 全部使用 **Relative 寻址**；
+- 如果条件满足，修改 PC；
+- 若目标地址跨页，多消耗一个周期。
+
+| 指令    | 条件         |
+| ------- | ------------ |
+| **BCC** | Carry = 0    |
+| **BCS** | Carry = 1    |
+| **BEQ** | Zero = 1     |
+| **BNE** | Zero = 0     |
+| **BPL** | Negative = 0 |
+| **BMI** | Negative = 1 |
+| **BVC** | Overflow = 0 |
+| **BVS** | Overflow = 1 |
+
+**示例：BEQ3**
+
+```cpp
+void CPU::BEQ() {
+    if (getFlag(Z)) {
+        cycles++;
+        uint16_t oldPC = PC;
+        PC += addr_rel;
+        if ((oldPC & 0xFF00) != (PC & 0xFF00)) cycles++;
+    }
+}
+```
+
+------
+
+### 8) Jump
+
+> 跳转类：JMP、JSR、RTS、BRK、RTI
+
+**JMP**
+
+```cpp
+void CPU::JMP() { PC = addr_abs; }
+```
+
+**JSR / RTS**
+
+- **JSR**：压入返回地址（PC-1），跳转；
+- **RTS**：从栈中弹出返回地址，加 1。
+
+```cpp
+void CPU::JSR() {
+    PC--;
+    push((PC >> 8) & 0xFF);
+    push(PC & 0xFF);
+    PC = addr_abs;
+}
+void CPU::RTS() {
+    uint16_t lo = pull();
+    uint16_t hi = pull();
+    PC = ((hi << 8) | lo) + 1;
+}
+```
+
+**BRK / RTI**
+
+- **BRK**：软中断，压栈状态与返回地址；
+- **RTI**：从栈恢复标志和 PC。
+
+------
+
+### 9) Stack
+
+> 堆栈类：PHA、PLA、PHP、PLP、TXS、TSX
+
+| 指令    | 功能           | 影响标志 |
+| ------- | -------------- | -------- |
+| **PHA** | 压入 A         | 无       |
+| **PLA** | 弹出到 A       | Z, N     |
+| **PHP** | 压入状态寄存器 | 无       |
+| **PLP** | 弹出状态寄存器 | 所有     |
+| **TXS** | X → 栈指针     | 无       |
+| **TSX** | 栈指针 → X     | Z, N     |
+
+```cpp
+void CPU::PHA() { push(A); }
+void CPU::PLA() { A = pull(); setFlag(Z, A==0); setFlag(N, A&0x80); }
+```
+
+------
+
+### 10) Flags
+
+> 标志位操作：CLC、SEC、CLI、SEI、CLD、SED、CLV
+
+| 指令    | 功能                          | 修改标志 |
+| ------- | ----------------------------- | -------- |
+| **CLC** | 清除进位                      | C=0      |
+| **SEC** | 置进位                        | C=1      |
+| **CLI** | 启用中断                      | I=0      |
+| **SEI** | 禁用中断                      | I=1      |
+| **CLD** | 清除十进制模式（无效于 2A03） | D=0      |
+| **SED** | 设置十进制模式（无效于 2A03） | D=1      |
+| **CLV** | 清除溢出                      | V=0      |
+
+> NES CPU（2A03）不支持十进制模式，因此 `CLD/SED` 实际无作用，但应保留指令实现。
+
+------
+
+### 11) Others（NOP、XXX）
+
+**NOP**
+
+- 空操作，不改变任何状态。
+- 某些非法 opcode 在 NES 游戏中被用作特殊延迟或副作用操作（可选模拟）。
+
+```cpp
+void CPU::NOP() {}
+```
+
+**XXX**
+
+- 占位符，代表未实现或非法指令。
+
+## 4.6  模拟实现思路
+
+要在模拟器中实现CPU执行指令的过程，有一种常见的思路，即维护一个操作码表，当从读取到操作码后，通过查表，找到该操作码的寻址方式和具体指令。如下所示，`__operations`是一个`operation`结构体的数组，用于注册操作码和具体的寻址函数，指令函数和执行该操作码所需要的时钟周期。
+
+```c
+struct operation {
+    void (*addressing_func)(void);
+    void (*instruction_func)(void);
+    u64  instruction_code : 8;
+    u64  addressing_code : 8;
+    u64  cycles : 8;
+    u64  __padding : 40;
+};
+
+// 注册操作码
+struct operation __operations[] = { 
+    OP( BRK, IMM, 7 ), OP( ORA, IZX, 6 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
+    ...
+};
+```
+
+有了操作码表，我们就可以简单地用下面几行代码来模拟CPU执行指令了。
+
+```c
+void cpu_clock() {
+    u8 opcode = bus_read(__pc++);
+    remain_cycles = __operations[opcode].cycles;
+    __operations[opcode].addressing_func();
+    __operations[opcode].instruction_func();
+}
+```
+
+> 操作码表参考：https://www.oxyron.de/html/opcodes02.html
+
