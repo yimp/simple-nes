@@ -1,5 +1,6 @@
 #include "libretro.h"
 #include "cpu.h"
+#include "cart.h"
 
 static retro_video_refresh_t __video_cb;
 
@@ -10,6 +11,7 @@ RETRO_API void retro_init(void)
 
 RETRO_API bool retro_load_game(const struct retro_game_info *game)
 {
+    cart_load(game->data);
     return true;
 }
 

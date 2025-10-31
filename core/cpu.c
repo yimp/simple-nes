@@ -1,15 +1,8 @@
 #include "cpu.h"
+#include "bus.h"
 #include <assert.h>
 #include <string.h>
 
-static u8 ram[0x800];
-uint8_t bus_read(uint16_t addr) {
-    return ram[addr & 0x7FF];
-}
-
-void bus_write(uint16_t addr, uint8_t data) {
-    ram[addr & 0x7FF] = 0x00;
-}
 
 
 #pragma region "interal registers"
@@ -616,43 +609,11 @@ CLK:
     return remain_cycles == 0;
 }
 
-
 void cpu_reset() 
 {
-/*
-Address  Hexdump   Dissassembly
--------------------------------
-$0600    a2 00     LDX #$00
-$0602    a0 00     LDY #$00
-$0604    e8        INX 
-$0605    98        TYA 
-$0606    49 1f     EOR #$1f
-$0608    a8        TAY 
-$0609    8a        TXA 
-$060a    6d ff ff  ADC $ffff
-$060d    aa        TAX 
-$060e    88        DEY 
-$060f    ea        NOP 
-$0610    ea        NOP 
-$0611    4c 04 06  JMP $0604
-*/
-    __pc = 0x0600;
-    u8 rom[] = {
-        0xa2, 0x00,
-        0xa0, 0x00, 
-        0xe8, 
-        0x98, 
-        0x49, 0x1f, 
-        0xa8, 
-        0x8a, 
-        0x6d, 0xff, 0xff, 
-        0xaa, 
-        0x88, 
-        0xea,
-        0xea, 
-        0x4c, 0x04, 0x06 
-    };
-    memcpy(&ram[0x600], rom, sizeof(rom));
+    uint16_t lo = bus_read(0xFFFC + 0);
+    uint16_t hi = bus_read(0xFFFC + 1);
+    __pc = (hi << 8) | lo;
 }
 
 u16 cpu_x_y() {
