@@ -1,5 +1,6 @@
 #include "bus.h"
 #include "cart.h"
+#include "ppu.h"
 
 enum adress_space
 {
@@ -35,7 +36,7 @@ uint8_t bus_read(uint16_t addr)
     switch (bus_memory_map(addr))
     {
     case RAM: return __ram[addr & 0x7FF];
-    case PPUIO: return 0x00;
+    case PPUIO: return ppu_bus_read(addr);
     case APUIO: return 0x00;
     case CARTIO: return cart_read(addr);
     default: break;
@@ -48,7 +49,7 @@ void bus_write(uint16_t addr, uint8_t data)
     switch (bus_memory_map(addr))
     {
     case RAM:  __ram[addr & 0x7FF] = data; return;
-    case PPUIO: return;
+    case PPUIO: ppu_bus_write(addr, data); return;
     case APUIO: return;
     case CARTIO: cart_write(addr, data);
     default: break;

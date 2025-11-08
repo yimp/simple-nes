@@ -1,6 +1,7 @@
 #include "libretro.h"
 #include "cpu.h"
 #include "cart.h"
+#include "ppu.h"
 
 static retro_video_refresh_t __video_cb;
 
@@ -22,11 +23,14 @@ RETRO_API void retro_run(void)
     // r,g,b
     // 5(0-31), 6(0-63), 5(0-31)
 
-    cpu_clock();
-
-    static short buffer[256*240];
-    for (int i = 0; i < 256*240; i++) {
-        buffer[i] = cpu_x_y();
+    u16* buffer = NULL;
+    while (!(buffer = ppu_frame_buffer()))
+    {
+        cpu_clock();
+        ppu_clock();
+        if (ppu_nmi_triggered()) {
+            cpu_nmi();
+        }
     }
 
     __video_cb(buffer, 256, 240, 256 * 2);

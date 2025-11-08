@@ -44,8 +44,10 @@ static u8   fetch_operand()
 
 static void store_operand(u8 operand)
 {
-    if (__helper_implied_flag)
+    if (__helper_implied_flag) {
         __a = operand;
+        return;
+    }
     bus_write(__helper_addr, operand);
 }
 static void stack_push(u8 data) {
@@ -545,7 +547,7 @@ I(RTI) {
     SetFlag(b, 0);
     SetFlag(u, 0);
     __pc = stack_pop();
-    __pc | (stack_pop() << 8);
+    __pc |= (stack_pop() << 8);
 }
 #pragma endregion
 
@@ -590,6 +592,9 @@ I(CLV) { SetFlag(v, 0); }
 #pragma endregion
 #pragma endregion
 
+#pragma region "basics"
+static bool __nmi_pending = false;
+
 bool cpu_clock() 
 {
     static u32 remain_cycles = 8;
@@ -597,6 +602,20 @@ bool cpu_clock()
         goto CLK;
     }
 
+    if (__nmi_pending) {
+        stack_push((__pc >> 8) & 0x00FF);
+        stack_push((__pc) & 0x00FF);
+        SetFlag(b, 0);
+        SetFlag(u, 1);
+        SetFlag(i, 1);
+        stack_push((__p.reg));
+
+        u16 lo = bus_read(0xFFFA + 0);
+        u16 hi = bus_read(0xFFFA + 1);
+        __pc = (hi << 8) | lo;
+        remain_cycles += 8;
+        __nmi_pending = false;
+    }
     {
         u8 opcode = bus_read(__pc++);
         remain_cycles = __operations[opcode].cycles;
@@ -616,6 +635,14 @@ void cpu_reset()
     __pc = (hi << 8) | lo;
 }
 
+void cpu_nmi()
+{
+    __nmi_pending = true;
+}
+#pragma endregion
+
 u16 cpu_x_y() {
     return (__x << 8) | (int)__y; 
 }
+
+
