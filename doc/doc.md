@@ -2058,7 +2058,337 @@ void PPU::clock() {
 }
 ```
 
+## 6.5 背景渲染
 
+### 6.5.1 概述
+
+NES 的背景由 **32×30** 个图块（tile）组成，每个图块是 **8×8 像素**。
+
+<img src="assets/background_grid.png" alt="1" style="zoom:150%;" />
+
+渲染一个背景像素需要：
+
+1. 计算像素属于哪个 tile（通过 coarse_x / coarse_y）
+2. 计算 tile 的图案编号（name table）
+3. 计算 tile 的属性（attribute table）
+4. 获取图块图案数据（pattern table）
+5. 得到 2bit 像素（pattern）与 2bit 调色板编号（attribute）
+6. 拼成一个 4bit 的颜色索引
+7. 访问 PPU palette 内存（0x3F00）得到最终 RGB 色值
+
+**在本章节中，我们聚焦于背景渲染原理，暂时不考虑 nametable 翻页、背景滚动scroll X/Y、increment rules 等内容，我们采用一种“整帧一次性渲染”的方式来简单实现这个过程。**
+
+### 6.5.2 Name-table
+
+**1) Name Table 是什么？它的本质是什么？**
+
+**一句话：Name Table 是一张“背景 tile 网格表”，存储的是每个 tile 的图块编号。**
+
+NES PPU 使用 **256×240 像素的背景**，但并不是逐像素存储的，而是拆成 **32×30 个 tile**：
+
+- 每个 tile = 8×8 像素
+- 32 tiles * 8 = 256 像素
+- 30 tiles * 8 = 240 像素
+
+所以：
+
+| 内容                   | 数字                          |
+| ---------------------- | ----------------------------- |
+| 一张 Name Table 的大小 | **32 × 30 = 960 bytes**       |
+| 每个 entry             | 1 个字节（tile ID）           |
+| tile ID 表示什么       | 指向 Pattern Table 的图块索引 |
+
+因此 **Name Table 是一个 tile 的地图，其字节值不是颜色，而是 tile 的编号**。
+
+------
+
+**2) 为什么有四张 Name Table？为什么他们可以是镜像？**
+
+NES 设计上支持**水平/垂直/四屏**滚动背景，因此有四张理论 Name Table：
+
+```
++--------+--------+
+| NT0    | NT1    |
++--------+--------+
+| NT2    | NT3    |
++--------+--------+
+```
+
+但：
+
+- NES PPU 的显存 **只有 2KB（2048 bytes）**
+- 足够存 **两个 Name Table + 两个 Attribute Table**
+
+所以：
+
+- 部分游戏使用 **水平镜像**
+- 部分游戏使用 **垂直镜像**
+- 特殊卡带（如 MMC5）支持四屏
+
+这也是为何 PPU 的地址空间 0x2000~0x2FFF 有镜像关系。
+
+> 在本章节中，我们只使用了 Name Table 0，忽略滚动、镜像。
+
+### 6.5.3 VRAM地址结构
+
+VRAM地址的有效地址12位（bit 0-11），fine y本身不属于vram的地址组成部分，但是我们通常利用一个short类型（16位）的变量来存储fine y：
+
+```
+15 | 14 13 12 | 11 10 | 9 8 7 6 5 | 4 3 2 1 0
+   |   fine_y | NT YX | coarse Y  | coarse X
+```
+
+更清晰地解释：
+
+| 成员        | 位宽  | 作用                                                         |
+| ----------- | ----- | ------------------------------------------------------------ |
+| coarse_x    | 5 bit | 每 8 像素递增一次。逻辑上可认为是图块列索引。                |
+| coarse_y    | 5 bit | 每 8 像素递增一次。逻辑上可认为是图块行索引。                |
+| nametable_x | 1 bit | 左/右画面切换，可结合nametable镜像，实现画面的水平滚动。     |
+| nametable_y | 1 bit | 上/下画面切换，可结合nametable镜像，实现画面的垂直滚动。     |
+| fine_y      | 3 bit | 一个tile 内部 Y 像素行，记录当前扫描线渲染到图块的哪一行了。 |
+
+真实 PPU 会在每个 cycle 更新 `vram_addr` 的 coarse/fine 坐标，实现水平滚动与垂直滚动。我们这里简单的根据 (i,j) 像素坐标计算vram_addr ：
+
+```cpp
+__vram_addr.reg = (((i >> 3) << 5) | (j >> 3));
+__vram_addr.fine_y = (i & 0x07);
+```
+
+含义如下：
+
+| 屏幕坐标 | 对应 VRAM 字段 | 说明                 |
+| -------- | -------------- | -------------------- |
+| j >> 3   | coarse_x       | 每 8 像素一个 tile   |
+| i >> 3   | coarse_y       | 每 8 像素一个 tile   |
+| i & 7    | fine_y         | 图块内部的行号 (0~7) |
+
+> 这里我们跳过了nametable 翻页、scroll X/Y、increment rules 等内容，这些内容等到背景滚动章节在补充。
+
+### 6.5.4 Attribute-table
+
+**1) 概述**
+
+**Attribute Table 用来指定“每 4×4 个 tile 所使用的哪一个调色板（2bit）。**
+
+背景的每个 tile 不能随意使用调色板，而必须从 **4 个背景调色板中选择一个（编号 0~3）**。
+
+调色板的"选择分辨率"比 tile 粗糙：
+
+- 一个 attribute entry 控制 **4×4 = 16 个 tiles**
+- 每个 entry 占 1 byte
+- 每个 entry 有 **4 组 2-bit**：
+  - TL（左上）
+  - TR（右上）
+  - BL（左下）
+  - BR（右下）
+
+![](assets/attrib.png)
+
+------
+
+**2) Attribute-table寻址**
+
+Attribute-table的大小为64字节，和Name-table在显存中**紧挨着存放**。PPU利用vram_addr寄存器中的显存地址读取Name-table的内容，也就是图块ID，同时也根据这个地址从Attribute-table中读取图块的属性。下面是显存地址计算图块属性地址的逻辑：
+
+```cpp
+static inline u16 attrib_addr()
+{
+    return ATTRIB_TABLE_0_BASE
+        | ( __vram_addr.nametable_y << 11)
+        | ( __vram_addr.nametable_x << 10)
+        | ((__vram_addr.coarse_y >> 2) << 3)
+        | ( __vram_addr.coarse_x >> 2);
+}
+```
+
+拆解如下：
+
+1. **选择 Name-table**：Attribute-table和Name-table一样，分为4个，每个960字节的name-table后紧跟一个64字节的Attribute-table，总大小为1024字节。
+
+   ```
+   nametable_y → bit 11
+   nametable_x → bit 10
+   ```
+
+2. **计算 attribute 区块（每 4 tile 一个属性字节）**
+
+   ```
+   coarse_y >> 2  → 第几个 4×4 tile 区块的 Y
+   coarse_x >> 2  → 第几个 4×4 tile 区块的 X
+   ```
+
+每个 attribute 表地址映射如下：
+
+```
+Attribute Table Base = 0x23C0 | nametable select
+Offset = (coarse_y / 4) * 8 + (coarse_x / 4)
+```
+
+------
+
+**3) 定位tile的attribute**
+
+通过上一步寻址得到的地址读取出attribute字节，这一个字节包含16个tiles的属性，所以我们需要从中解析出当前正在绘制的这个tile的属性。算法如下：
+
+```cpp
+static inline u8 attrib_component(u8 attrib)
+{
+    return (attrib >> (((__vram_addr.coarse_y & 2) | ((__vram_addr.coarse_x & 2) >> 1)) << 1)) & 0x03;
+}
+```
+
+这里的核心在于：
+
+- `coarse_x & 2` 判断 tile 在`4x4 quad`中的位置是左or右
+- `coarse_y & 2` 判断 tile 在`4x4 quad`中的位置是上or下
+
+然后把这两个 bit 合成为 0~3 的象限编号：
+
+```
+00 → 左上
+01 → 右上
+10 → 左下
+11 → 右下
+```
+
+每个象限对应 attribute 字节中的两个 bit：
+
+```
+bit 0-1 → 左上 2x2 tile
+bit 2-3 → 右上 2x2 tile
+bit 4-5 → 左下 2x2 tile
+bit 6-7 → 右下 2x2 tile
+```
+
+因此 `attrib_component()` 就是“取出对应象限的 2bit”。
+
+### 6.5.5 Pattern-table
+
+Pattern-table 中存储的是每个tile图块的像素数据，一个tile的大小为64像素，如果每个像素的RGB颜色存储下来，则总共需要128字节（每个RGB像素值为16位）。而在实际NES游戏中，每个图块数据的大小仅为16字节：
+
+```
+每个 tile = 16 字节
+前 8 字节 = LSB bitplane（低位）
+后 8 字节 = MSB bitplane（高位）
+```
+
+16字节总共16x8=128位，一个tile中每个像素就分到2位数据，这2bit数据表示的这个像素的颜色在调色盘中的索引。有了这2位数据，再结合图块attribute值就可以找到具体的RGB颜色值。
+
+![](assets/pattern.png)
+
+地址计算逻辑：
+
+```c
+static inline u16 bg_tile_lsb_addr(u8 name)
+{
+    return __control.pattern_background << 12
+         | name << 4
+         | __vram_addr.fine_y;
+}
+
+static inline u16 bg_tile_msb_addr(u8 name)
+{
+    return __control.pattern_background << 12
+         | name << 4
+         | 0b1000
+         | __vram_addr.fine_y;
+}
+```
+
+拆解：
+
+| 部分                       | 说明                           |
+| -------------------------- | ------------------------------ |
+| `pattern_background << 12` | 0x0000 或 0x1000               |
+| `name << 4`                | name * 16 ，定位到图块起始地址 |
+| `fine_y`                   | 图块内部的行 (0~7)             |
+| `0b1000`                   | +8，进入 MSB 区域              |
+
+### 6.5.6 像素生成
+
+NES 并不直接在图块里存储 RGB 颜色，而是使用 **调色板索引系统**。所有背景与精灵的像素颜色，最终都来自一个 **固定大小的颜色表**。
+
+------
+
+**1) NES 系统 64 种基础颜色**
+
+NES PPU 内置一个 **64 色的静态颜色索引表**，也称 **system palette** 或 **universal palette**。
+
+索引范围：
+
+```
+0x00 ~ 0x3F   共64个颜色
+```
+
+每个值对应一种固定 RGB 颜色，例如（示意）：
+
+| 索引 | 十六进制 | 颜色描述（大致） |
+| ---- | -------- | ---------------- |
+| 0x00 | 偏灰黑   | #525252          |
+| 0x01 | 蓝色     | #0039A6          |
+| 0x0F | 白色     | #FFFFFF          |
+| 0x21 | 草地绿   | #00E600          |
+| 0x30 | 红棕色   | #A63A00          |
+
+------
+
+**2) Palette RAM 数据布局（背景 + 精灵）**
+
+调色板存储在 PPU 内部的 **32 字节 Palette RAM**，其中每一个字节都是PPU内部64 色的静态颜色的索引。访问地址范围：
+
+```
+0x3F00 ~ 0x3F1F   共 32字节
+```
+
+布局如下：
+
+| 范围          | 用途                                                     |
+| ------------- | -------------------------------------------------------- |
+| 0x3F00–0x3F0F | 背景调色板（Background Palettes）。一共4 组，每组 4 色。 |
+| 0x3F10–0x3F1F | 精灵调色板（Sprite Palettes）。一共4 组，每组 4 色。     |
+
+结构：
+
+```
+背景调色板 (16字节)
+$3F00 : 背景通用颜色（共享） Universal Background Color
+$3F01 : 背景调色板0 色1
+$3F02 : 背景调色板0 色2
+$3F03 : 背景调色板0 色3
+$3F04 : 背景通用颜色（共享） Universal Background Color
+$3F05 : 背景调色板1 色4
+$3F06 : 背景调色板1 色5
+$3F05 : 背景调色板1 色6
+...
+$3F0F : 背景调色板3 色n
+
+精灵调色板结构完全相同（16字节）
+```
+
+另外，Palette RAM也有存在镜像（详见6.3.6）：
+
+```
+$3F10 = $3F00
+$3F14 = $3F04
+$3F18 = $3F08
+$3F1C = $3F0C
+```
+
+**在Attribute-table中取出的2-bit数据，实际上就是在选择具体的Palette，而从Pattern-table中取出的2-bit数据，则是在这个Palette中选择一个颜色。**
+
+```
+attrib 0–3 → 对应背景调色板编号 palette_group
+pixel  0-3 → 在palette_group中选择一个颜色
+```
+
+如果 palette_group = 2, pixel=1，则背景颜色的索引的地址为：
+
+```
+0x3F00 + (2 << 2) + 1
+```
+
+接下来只要从这个地址中读取出颜色索引，就可以从PPU64颜色表中找到最终的颜色了。
 
 
 

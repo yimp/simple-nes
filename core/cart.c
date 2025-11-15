@@ -97,5 +97,13 @@ u8   cart_read(u16 addr)
 
 void cart_write(u16 addr, u8 data)
 {
-
 }
+
+
+bool cart_ppu_mapped_addr(u16) { return false; }
+u8   cart_ppu_read(u16 addr) 
+{
+    return __chr_area[addr & (CHR_BANK_SIZE - 1)];
+}
+
+void cart_ppu_write(u16 addr, u8 data) { }

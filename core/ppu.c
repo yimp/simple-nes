@@ -1,8 +1,6 @@
 #include "ppu.h"
+#include "cart.h"
 
-bool cart_ppu_mapped_addr(u16) { return false; }
-u8   cart_ppu_read(u16 addr) { return 0x00; }
-void cart_ppu_write(u16 addr, u8 data) { }
 
 #pragma region "registers"
 typedef union {
@@ -95,6 +93,7 @@ enum ppu_io_device
 static u8 __data_buffer = 0x00;
 static u8 __latch_address = 0; 
 static u8 __vram[0x800];
+static u8 __pram[0x020];
 
 static u16 mirror_vram_addr(u16 addr) { return addr & 0x07FF; }
 static u8 ppu_read_vram(u16 addr)
@@ -104,7 +103,11 @@ static u8 ppu_read_vram(u16 addr)
 
 static u8 ppu_read_pram(u16 addr)
 {
-    return 0x00;
+    // Palette RAM: $3F00-$3FFF, mirrored every 32 bytes
+    u16 pal_addr = (addr - 0x3F00) & 0x1F;
+    if ((pal_addr & 0x03) == 0) 
+        pal_addr = 0x00; // transparent
+    return __pram[pal_addr];
 }
 
 static void ppu_write_vram(u16 addr, u8 data)
@@ -114,7 +117,13 @@ static void ppu_write_vram(u16 addr, u8 data)
 
 static void ppu_write_pram(u16 addr, u8 data)
 {
-
+    // Palette RAM: $3F00-$3FFF, mirrored every 32 bytes
+    u16 pal_addr = (addr - 0x3F00) & 0x1F;
+    if (pal_addr == 0x10) pal_addr = 0x00;
+    if (pal_addr == 0x14) pal_addr = 0x04;
+    if (pal_addr == 0x18) pal_addr = 0x08;
+    if (pal_addr == 0x1C) pal_addr = 0x0C;
+    __pram[pal_addr] = data;
 }
 
 static int ppu_bus_memory_map(u16 addr)
@@ -220,6 +229,7 @@ void ppu_bus_write(u16 addr, u8 data)
             __vram_addr = __tram_addr;
             __latch_address = 0;
         }
+        break;
     }
     case PPU_DATA:{
         ppu_internal_write(__vram_addr.reg, data);
@@ -234,9 +244,76 @@ void ppu_bus_write(u16 addr, u8 data)
 #pragma endregion
 
 #pragma region "basics"
+#define PIXEL_COLOR_RGB_565(r, g, b) \
+    (u16)((((r) >> 3) << 11) | (((g) >> 2) << 5) | ((b) >> 3))
+#define COLOR(r, g, b) PIXEL_COLOR_RGB_565(r, g, b)
 static bool __nmi = false;
 static bool __frame_complete = false;
 static u16 __frame_buffer[256*240];
+static u16 __system_palette[0x40] = {
+    COLOR( 84,  84,  84), COLOR(  0,  30, 116), COLOR(  8,  16, 144), COLOR( 48,   0, 136),
+	COLOR( 68,   0, 100), COLOR( 92,   0,  48), COLOR( 84,   4,   0), COLOR( 60,  24,   0),
+	COLOR( 32,  42,   0), COLOR(  8,  58,   0), COLOR(  0,  64,   0), COLOR(  0,  60,   0),
+	COLOR(  0,  50,  60), COLOR(  0,   0,   0), COLOR(  0,   0,   0), COLOR(  0,   0,   0),
+	COLOR(152, 150, 152), COLOR(  8,  76, 196), COLOR( 48,  50, 236), COLOR( 92,  30, 228),
+	COLOR(136,  20, 176), COLOR(160,  20, 100), COLOR(152,  34,  32), COLOR(120,  60,   0),
+	COLOR( 84,  90,   0), COLOR( 40, 114,   0), COLOR(  8, 124,   0), COLOR(  0, 118,  40),
+	COLOR(  0, 102, 120), COLOR(  0,   0,   0), COLOR(  0,   0,   0), COLOR(  0,   0,   0),
+	COLOR(236, 238, 236), COLOR( 76, 154, 236), COLOR(120, 124, 236), COLOR(176,  98, 236),
+	COLOR(228,  84, 236), COLOR(236,  88, 180), COLOR(236, 106, 100), COLOR(212, 136,  32),
+	COLOR(160, 170,   0), COLOR(116, 196,   0), COLOR( 76, 208,  32), COLOR( 56, 204, 108),
+	COLOR( 56, 180, 204), COLOR( 60,  60,  60), COLOR(  0,   0,   0), COLOR(  0,   0,   0),
+	COLOR(236, 238, 236), COLOR(168, 204, 236), COLOR(188, 188, 236), COLOR(212, 178, 236),
+	COLOR(236, 174, 236), COLOR(236, 174, 212), COLOR(236, 180, 176), COLOR(228, 196, 144),
+	COLOR(204, 210, 120), COLOR(180, 222, 120), COLOR(168, 226, 144), COLOR(152, 226, 180),
+	COLOR(160, 214, 228), COLOR(160, 162, 160), COLOR(  0,   0,   0), COLOR(  0,   0,   0),
+};
+
+#pragma region "render"
+#define NAME_TABLE_0_BASE		0x2000
+#define ATTRIB_TABLE_0_BASE		0x23C0
+#define NAME_TABLE_1_BASE		0x2400
+#define ATTRIB_TABLE_1_BASE		0x27C0
+#define NAME_TABLE_2_BASE		0x2800
+#define ATTRIB_TABLE_2_BASE		0x23C0
+#define NAME_TABLE_3_BASE		0x2C00
+#define ATTRIB_TABLE_3_BASE		0x2FC0
+
+static inline u16 attrib_addr()
+{
+    return ATTRIB_TABLE_0_BASE
+        | ( __vram_addr.nametable_y << 11)
+        | ( __vram_addr.nametable_x << 10)
+        | ((__vram_addr.coarse_y >> 2) << 3)
+        | ( __vram_addr.coarse_x >> 2);
+}
+
+static inline u8 attrib_component(u8 attrib)
+{
+    return (attrib >> (((__vram_addr.coarse_y & 2) | ((__vram_addr.coarse_x & 2) >> 1)) << 1)) & 0x03;
+}
+
+static inline u16 bg_tile_lsb_addr(u8 name)
+{
+    return __control.pattern_background << 12
+         | name << 4
+         | __vram_addr.fine_y;
+}
+
+static inline u16 bg_tile_msb_addr(u8 name)
+{
+    return __control.pattern_background << 12
+         | name << 4
+         | 0b1000
+         | __vram_addr.fine_y;
+}
+
+static inline void draw_one_pixel(i16 x, i16 y, u8 palette_index)
+{
+    __frame_buffer[y * 256 + x] = __system_palette[palette_index & 0x3F];
+}
+
+#pragma endregion
 
 void ppu_clock()
 {
@@ -268,20 +345,30 @@ LAST_CYCLE_OF_FRAME:
         {
             for (int j = 0; j < 256; ++j) 
             {
-                u8 name = (ppu_internal_read(0x2000 | (((i >> 3) << 5) | (j >> 3))));
+                __vram_addr.reg = (((i >> 3) << 5) | (j >> 3));
+                __vram_addr.fine_y = (i & 0x07);
+
+                u8 name = (ppu_internal_read(0x2000 | (__vram_addr.reg & 0x0FFF)));
+                u8 attr = ppu_internal_read(attrib_addr());
+                attr = attrib_component(attr);
+
+                u8 bg_tile_lsb = ppu_internal_read(bg_tile_lsb_addr(name));
+                u8 bg_tile_msb = ppu_internal_read(bg_tile_msb_addr(name));
+
+                u8 bg_attr_lsb = ((attr & 0x01) ? 0xFF : 0x00); // attr 10 -> FF 00
+                u8 bg_attr_msb = ((attr & 0x02) ? 0xFF : 0x00);
+
                 {
-                    // 提取RGB332的各分量
-                    uint8_t r3 = (name >> 5) & 0x07;  // 高3位R（0~7）
-                    uint8_t g3 = (name >> 2) & 0x07;  // 中间3位G（0~7）
-                    uint8_t b2 = name & 0x03;         // 低2位B（0~3）
-                    
-                    // 扩展为RGB565各分量
-                    uint8_t r5 = (r3 << 2) | (r3 >> 1);  // 3位→5位：左移2位 + 填充最高位的1位（r3>>1取最高位）
-                    uint8_t g5 = (g3 << 3) | (g3);       // 3位→6位：左移3位 + 填充最高位的3位（g3本身重复）
-                    uint8_t b5 = (b2 << 3) | (b2 << 1) | (b2 >> 1);  // 2位→5位：左移3位 + 填充最高位的2位
-                    
-                    // 组合为16位RGB565（高5位R，中6位G，低5位B）
-                    __frame_buffer[i * 256 + j] = (u16)((r5 << 11) | (g5 << 5) | b5);
+                    u8 lo = (bg_tile_lsb << (j & 0x07)) & 0x80;
+                    u8 hi = (bg_tile_msb << (j & 0x07)) & 0x80;
+                    u8 bg_pixel = ((hi > 0) << 1) | (lo > 0);
+
+                    lo = (bg_attr_lsb << (j & 0x07)) & 0x80;
+                    hi = (bg_attr_msb << (j & 0x07)) & 0x80;
+                    u8 bg_palette = ((hi > 0) << 1) | (lo > 0); // bg_palette == attr
+
+                    u8 bg_pixel_data = ((bg_palette & 0x03) << 2) | (bg_pixel & 0x03);
+                    draw_one_pixel(j, i, ppu_internal_read(0x3F00 | (bg_pixel_data)));
                 }
             }
         }
