@@ -2390,5 +2390,560 @@ pixel  0-3 → 在palette_group中选择一个颜色
 
 接下来只要从这个地址中读取出颜色索引，就可以从PPU64颜色表中找到最终的颜色了。
 
+## 6.6 精灵（前景）渲染
+
+### 6.6.1 OAM(Object Attribute Memory)
+
+NES 共有 **64 个精灵（Sprites）**，存放在PPU的OAM中，每个精灵固定使用 **4 字节** 的数据，因此 OAM 区域大小为：
+
+```
+64 sprites × 4 bytes = 256 bytes
+```
+
+OAM（$200–2FF$）并不是 CPU 可直接寻址的区域，它只能通过：
+
+- `$2003`：OAMADDR（设置 OAM index）
+- `$2004`：OAMDATA（读/写单字节）
+- `$4014`：OAMDMA（整页复制）
+
+来进行读写。
+
+OAM 的物理布局如下：
+
+| 字节   | 名称       | 含义                          |
+| ------ | ---------- | ----------------------------- |
+| Byte 0 | Y          | 精灵的 Y 坐标（屏幕坐标 - 1） |
+| Byte 1 | Tile Index | 图案表索引                    |
+| Byte 2 | Attribute  | 颜色选择 + 翻转 + 优先级      |
+| Byte 3 | X          | 精灵的 X 坐标                 |
+
+------
+
+各字段详细说明如下：
+
+**1) Byte 0：Y 坐标**
+
+存储的是 **精灵的垂直起始位置 - 1**。
+
+- 8x8 模式：精灵范围为 Y~Y+7
+- 8x16 模式：精灵范围为 Y~Y+15
+
+例如：
+
+```
+OAM[0] = 0x20 → 精灵显示在屏幕 Y=0x21 到 0x28
+```
+
+PPU 会在扫描线等于 Y+1 时开始渲染该精灵。
+
+------
+
+**2) Byte 1：Tile Index（图案索引）**
+
+图案表取决于 PPUCTRL：
+
+- PPUCTRL.bit3 → 精灵图案表选择（8x8 模式）
+- 8x16 模式：Tile 索引的低位决定 pattern-table，高位决定 tile 号
+
+**8 × 16 特别说明：**
+
+在 8×16 模式下：
+
+```
+tile_index   = pattern_table_select << 8 | (tile_number & 0xFE)
+lower_tile   = tile_index
+upper_tile   = tile_index + 1
+```
+
+8x16 模式严格要求 tile index 为偶数（奇数会被向下取偶数）。
+
+------
+
+**3) Byte 2：Attribute（属性字节）**
+
+位布局：
+
+```
+76543210
+||||||||
+||||||++- Palette (4 to 7) of sprite
+|||+++--- Unimplemented (read 0)
+||+------ Priority (0: in front of background; 1: behind background)
+|+------- Flip sprite horizontally
++-------- Flip sprite vertically
+```
+
+| 位      | 名称            | 含义                           |
+| ------- | --------------- | ------------------------------ |
+| 0–1     | Palette Index   | 精灵调色板号（0–3）            |
+| **2–4** | 未使用          | 永远为 0                       |
+| 5       | Priority        | 0 = 在背景前方；1 = 在背景后面 |
+| 6       | Flip Horizontal | 1 = 左右翻转                   |
+| 7       | Flip Vertical   | 1 = 上下翻转                   |
+
+------
+
+**4) Byte 3：X 坐标**
+
+精灵左侧的屏幕像素 X 坐标。
+
+```
+0x00 → 最左边
+0xFF → 屏幕之外右侧（隐藏）
+```
+
+------
+
+**关于次 OAM（Secondary OAM）**
+
+渲染过程中，PPU 不直接从 OAM 读数据，而是：
+
+1. 在每个扫描线开始时，清空 Secondary OAM（32字节）
+2. 在评估阶段（scanline 的 dot 65~256），将 OAM 中 **最多 8 个与当前扫描线有交集** 的精灵复制进去
+3. 渲染阶段从 Secondary OAM 输出像素
+
+因此：
+
+- OAM 是“原始数据”
+- Secondary OAM 是“当扫描线使用的精灵缓冲区”
+
+Sprite overflow flag（PPUSTATUS bit5）即在此阶段检测出。
+
+------
+
+### 6.6.2 OAM DMA 机制（$4014）
+
+**DMA 的目的**
+
+DMA 使 CPU 能快速向 OAM 写入整页数据（256 字节），用于快速更新 64 个精灵。
+
+写入 `$4014`：
+
+```
+CPU writes a value N → 执行 DMA：复制 $N00-$NFF 到 OAM
+```
+
+例：
+
+```
+STA $4014 ; A=02 → 复制 $0200-$02FF 到 OAM
+```
+
+------
+
+**DMA 过程的时序与开销**
+
+DMA 需要：
+
+```
+513 or 514 CPU cycles
+```
+
+CPU 会被完全挂起（冻结），直到 DMA 完成。PPU 会继续渲染，因此 DMA 发生在渲染阶段不会影响输出。
+
+**奇偶周期差异：**
+
+- 如果在 **偶数周期** 发起 DMA → 513 周期
+- 如果在 **奇数周期** 发起 DMA → 514 周期
+   因为 DMA 会插入一个 dummy cycle
+
+> 在偶数 / 奇数周期的差异对某些游戏有效，特别是基于精确时序的游戏，如：
+>
+> - Battletoads
+> - TMNT2
+>
+> 这些游戏需要在模拟器中还原 DMA 的时序才能正常运行。
+
+------
+
+**DMA 读写行为**
+
+DMA 是 **CPU 读取 → 写入 PPU-OAMDATA** 的重复过程：
+
+循环 256 次：
+
+```
+byte = read(page << 8 | offset)
+oam[oam_addr] = byte
+oam_addr++
+```
+
+OAMADDR 会被自动递增，但不会自动归零。如果 DMA 时地址不是 0，仍会从当前 oam_addr 开始写。许多游戏依赖这种行为。
+
+------
+
+### 6.6.3 精灵评估（Sprite Evaluation）
+
+精灵评估（Sprite Evaluation）是 PPU 在每条扫描线上准备精灵渲染数据的过程。
+ 评估的目的是：
+
+> **从 OAM 的 64 个精灵中，选出最多 8 个出现在当前扫描线的精灵，并复制到 Secondary OAM。**
+
+渲染阶段不会直接使用 OAM，而是使用 Secondary OAM（32 字节）中的预处理结果。
+
+------
+
+**输入：Primary OAM（$200–2FF$）**
+
+包含 64 个 sprite，每个 4 字节：
+
+```
+Byte0: Y coordinate
+Byte1: Tile Index
+Byte2: Attribute
+Byte3: X coordinate
+```
+
+**输出：Secondary OAM（32 字节）**
+
+最大容量：
+
+```
+8 sprites × 4 bytes = 32 bytes
+```
+
+内容是当前扫描线上可见的精灵的 **完整 OAM 条目拷贝**。
+
+------
+
+**精灵可见性的判断**
+
+PPU 在精灵评估阶段判断每个 sprite 是否与扫描线有交集。一个精灵在当前扫描线显示，当：
+
+```
+sprite.Y ≤ current_scanline < sprite.Y + sprite_height
+```
+
+sprite_height 为：
+
+- 8（8x8 模式）
+- 16（8x16 精灵模式）
+
+注意：OAM 中 Y 值为(屏幕坐标 - 1)
+
+因此实际判断通常写成：
+
+```
+scanline - sprite.Y ∈ [1, sprite_height]
+```
+
+------
+
+**sprite_count > 8 时触发 overflow**
+
+如果检测到 **第 9 个可见精灵**：
+
+- 按 NES 逻辑，应设置 PPUSTATUS 的 Sprite Overflow 标志（bit5）
+- 但并不再继续填充 Secondary OAM
+- Secondary OAM 保留前 8 个匹配的 sprite
+
+```cpp
+if (sprite_count == 8 && next_visible_sprite_found) {
+    set_ppustatus_sprite_overflow();
+}
+```
+
+在准确实现中，overflow 实际由硬件结构缺陷造成，与真实可见性判断不同，但这里我们忽略硬件级 bug。
+
+------
+
+**精灵顺序的重要性**
+
+注意：Secondary OAM 中精灵的顺序永远固定为 **OAM 中的顺序**。即：**低 OAM 索引 精灵拥有更高优先级**，并且在渲染阶段会先尝试输出（sprite 0 也依赖此顺序判断是否命中）。因此不要对 OAM 做排序。
+
+------
+
+### 6.6.4 Sprite 0 Hit
+
+Sprite 0 Hit 是 PPU 状态寄存器 PPUSTATUS 的 bit6（0x40）。
+ 它用于许多游戏的 HUD、文本显示、滚屏同步等逻辑。
+
+Sprite0 Hit 的核心规则非常简单：
+
+> 当 **Sprite #0 的非透明像素** 与 **背景的非透明像素** 在同一个屏幕坐标重叠时，PPUSTATUS 的 Sprite0Hit 置位。
+
+这发生在渲染扫描线期间，通常在像素级别的位置。
+
+------
+
+**Sprite0 Hit 的条件总结**
+
+| 条件 | 说明                                                 |
+| ---- | ---------------------------------------------------- |
+| 1    | 当前扫描线处于 0–239 的可见区域                      |
+| 2    | 背景未关闭（PPUMASK bit 3 != 0）                     |
+| 3    | 精灵未关闭（PPUMASK bit 4 != 0）                     |
+| 4    | Sprite0 在本扫描线上                                 |
+| 5    | Sprite0 在当前像素位置有非透明像素（fg_pixel != 0）  |
+| 6    | 背景在当前像素位置也有非透明像素（bg_pixel != 0）    |
+| 7    | 不在非渲染区域（x=0 的左侧 8 像素可能需要遵循 mask） |
+
+**特别注意：PPUMASK 的左边 8 像素裁剪**
+
+PPUMASK 的 bit 1 和 bit 2 控制左 8 像素的渲染：
+
+- bit1 = 0 → 左 8 像素背景关闭
+- bit2 = 0 → 左 8 像素精灵关闭
+
+因此：
+
+> 在 x ∈ [0,7] 位置，即使 fg/bg 都不透明，也可能因为掩码导致 sprite0 hit 不会发生。
+
+------
+
+**为什么必须与背景不透明像素相交？**
+
+因为 sprite0 hit 的目的就是提供：
+
+> “背景扫描到某个位置时，前景的 sprite0 与背景叠加”的事件。
+
+许多游戏利用这个事件来：
+
+- 精准同步 HUD 的滚动条
+- 在某扫描线触发逻辑
+- 实现 split-screen 滚动
+
+因此透明背景（bg_pixel=0）无法作为可靠的同步点。
+
+------
+
+### 6.6.5 pattern-table寻址
+
+**算法设计**
+
+计算在给定 `scanline`（当前扫描线）下，要读取某个 sprite 像素行的 pattern 表 **LSB / MSB** 的内存地址。两个维度要考虑：
+
+- **sprite 尺寸**：8×8 或 8×16（决定 tile 数量与寻址规则）
+- **垂直翻转（vertical flip）**：若启用，要从 tile 的底部向上读行数据（即把行号反转）
+
+地址最终由三部分组成：
+ `pattern-table-base`（由控制寄存器或 id 决定） + `tile_index * 16`（每 tile 占 16 字节） + `row-within-tile`（0..7）或 +8（MSB 平面）。
+
+------
+
+**1) 8×8 模式的寻址（`fg_8x8_tile_lsb_addr` / `_msb_addr`）**
+
+```c
+static inline u16 fg_8x8_tile_lsb_addr(u8 id, u8 y, u8 attr, int scanline)
+{
+	u8 t = (0x08 - ((attr & 0x80) >> 7)) & 0x07; // t is 0b000 or 0b111
+	return __control.pattern_sprite << 12 | id << 4 | (t ^ (scanline - y));
+}
+static inline u16 fg_8x8_tile_msb_addr(u8 id, u8 y, u8 attr,int scanline)
+{
+	u8 t = (0x08 - ((attr & 0x80) >> 7)) & 0x07; // t is 0b000 or 0b111
+	return __control.pattern_sprite << 12 | id << 4 | 0b1000 | (t ^ (scanline - y));
+}
+```
+
+**步骤解释**
+
+- **计算相对于精灵顶端的行偏移**
+   `scanline - y` 表示当前扫描线相对于精灵顶端（`y` 已是精确的起始行）。在 8×8 模式，这个值应在 `0..7` 之间（否则该 sprite 不在当前扫描线）。
+
+- **垂直翻转处理的巧妙位运算**
+
+  ```
+  u8 t = (0x08 - ((attr & 0x80) >> 7)) & 0x07;
+  ```
+
+  - `((attr & 0x80) >> 7)` 提取 attr 的 bit7（在你实现中作为 vertical flip 标志），结果 0 或 1。
+  - 若垂直翻转位 = 0 → `0x08 - 0 = 8` → `8 & 7 = 0` → `t = 0`
+     若垂直翻转位 = 1 → `0x08 - 1 = 7` → `7 & 7 = 7` → `t = 7`
+  - 所以 `t` 要么是 `0b000`（不翻转），要么是 `0b111`（翻转的掩码）。
+  - 然后 `t ^ (scanline - y)`：
+    - 若 `t == 0` → `d = scanline - y`（正常读取）
+    - 若 `t == 7` → `d = 7 ^ (scanline - y)`，由于 `7 ^ n = 7 - n` 对 0..7 成员成立 ⇒ 结果等同于 `7 - (scanline - y)`，即“从底部向上索引”的效果 ⇒ 垂直翻转正确实现。
+
+  这个技巧用位运算把“条件取反”转换为 `XOR`，避免分支分流，既短小又效率高。
+
+- **构造地址**
+
+  - `__control.pattern_sprite << 12`：选择 pattern-table 基址（$0000 或 $1000）
+  - `id << 4`：`id * 16`，跳到该 tile 的起始地址
+  - `| (d)`：在 LSB（或 MSB 加 8）内选取 `d` 行（0..7）
+
+- **MSB 的差别**
+   MSB 版本仅在地址中多了 `| 0b1000`（即 +8），因为 MSB plane 在 tile 的后 8 字节：
+
+  ```
+  ... | 0b1000 | (t ^ (scanline - y))
+  ```
+
+- ### 小结（8×8）
+  - 地址 = pattern_base + id*16 + row
+  - 若 vertical flip 则把 row 替换成 `7 - row`
+  - MSB plane 地址在 LSB 基础上加 8
+
+------
+
+**2) 8×16 模式的寻址（`fg_8x16_tile_lsb_addr` / `_msb_addr`）**
+
+8×16 模式下每个 sprite 占用两张连续的 8×8 tile（共 16×8 像素），pattern-table 的选择规则也不同：**pattern table 由 tile id 的最低位决定**（id & 1）。并且 tile 编号需要变换以定位到上/下半张 tile。
+
+```c
+static inline u16 fg_8x16_tile_lsb_addr(u8 id, u8 y, u8 attr)
+{
+	u8 t = (0x10 - ((attr & 0x80) >> 7)) & 0x0F; // t is 0b0000 or 0b1111
+	u8 d = (t ^ ((scanline - y) & 0x0F)); // 0x00 - 0x0F
+	return ((id & 0x01) << 12) | (((id & 0xFE) | ((d >> 3) & 1)) << 4) | (d & 0x07);
+}
+static inline u16 fg_8x16_tile_msb_addr(u8 id, u8 y, u8 attr)
+{
+	u8 t = (0x10 - ((attr & 0x80) >> 7)) & 0x0F; // t is 0b0000 or 0b1111
+	u8 d = (t ^ ((scanline - y) & 0x0F)); // 0x00 - 0x0F
+	return ((id & 0x01) << 12) | (((id & 0xFE) | ((d >> 3) & 1)) << 4) | 0b1000 | (d & 0x07);
+}
+```
+
+MSB 版本 similar plus `| 0b1000`.
+
+**步骤解释**
+
+- **计算相对于精灵顶端的行偏移**
+  - `scanline - y` 在 8×16 模式应在 `0..15`（两张 tile 的 16 行范围内），代码里先 `& 0x0F` 保证只看低 4 位。
+- **垂直翻转处理**
+  - 若 flip=0 → `t = 0` → `d = 0 ^ n = n`（0..15）
+  - 若 flip=1 → `t = 15` → `d = 15 ^ n = 15 - n`（反转 0..15）
+  - 因此 `d` 是“翻转后”的行索引，范围 0..15。
+
+- **pattern table 选择（8×16 特殊）**
+   在 8×16 模式：
+  - `id & 0x01`（id 的最低位）决定使用哪张 pattern table（0 → $0000，1 → $1000）。这用来设置 `((id & 0x01) << 12)`。
+  - 实际 tile 编号要使用 id 的偶数部分（`id & 0xFE`）作为两张 tile 中的基址。第 0 个 8×8 tile 为 `(id & 0xFE)`，第 1 个 tile 为 `(id & 0xFE) + 1`。
+- **选择上半 tile 还是下半 tile（d >> 3）**
+  - `d` 的高位（`d >> 3`）表示当前行在两张 tile的哪一半：
+    - `d` in `0..7` → high bit = 0 → 使用低位 tile（第一个 8×8）
+    - `d` in `8..15` → high bit = 1 → 使用高位 tile（第二个 8×8）
+  - 于是 `((d >> 3) & 1)` 给出了当前使用的是 tile0 还是 tile1。
+- **构建 tile 索引并乘 16（左移4）**
+  - `((id & 0xFE) | ((d >> 3) & 1))`：把基址偶数 id 的低位（bit0）用来选择第 0/1 张 tile
+  - 左移 4 等价乘 16，跳到 tile 的起始字节
+  - `| (d & 0x07)` 加上行内偏移（0..7）
+
+- **MSB 版** 同理，最后在地址中加 `0b1000` 以选择 MSB plane。
+
+**举例说明（8×16）**
+
+假设：
+
+- `id = 0x05` （binary 00000101，最低位 = 1 → pattern table 1）
+- `y = 20`，`scanline = 24` → `scanline - y = 4` → `d = 4`（未翻转）
+- `d >> 3 = 0` → 使用 tile index = `id & 0xFE | 0` = `0x04`
+- 行偏移 = `d & 0x07 = 4`
+
+地址 = (pattern_table = id&1 -> 1 <<12 => 0x1000) + (tile_index<<4 => 0x04*16 = 0x40) + 4 = 0x1000 + 0x40 + 4
+
+若 vertical flip = 1：
+
+- `t = 15` → `d = 15 ^ 4 = 11`
+- `d >> 3 = 1` → 使用 tile index = 0x04 | 1 = 0x05（也就是原 id 的偶数部分 +1，符合从下半 tile 读取）
+- `d & 0x07 = 3` → 行偏移为 3（因为是从下往上读）
+
+------
+
+**MSB 地址是如何从 LSB 地址延伸的？**
+
+在所有函数里，MSB 地址版本相对于 LSB 版本仅多了 `| 0b1000`（十进制 8），也即 tile 的后 8 字节。这是因为 tile 的第 8..15 字节存储高位平面（bit1）。所以 LSB 地址 + 8 = MSB 地址。
+
+**为什么用 `XOR`（`t ^ value`）来实现翻转？**
+
+`t` 为全 1 的位掩码（对于 3 位是 0b111，对于 4 位是 0b1111），`t ^ n` 等价 `bitwise_not(n) & mask`，而对 0..(2^bits-1) 的整数，这又等价 `max - n`（例如 `7 - n` 或 `15 - n`）。这样写的优点：**无分支**、少计算、更快速（在低级实现中常见）。
+
+### 6.6.6 精灵/背景混合规则
+
+------
+
+PPU 在每个像素点的最终颜色计算流程可以拆解为：
+
+```
+1. 背景像素（pattern + attribute → palette index）
+2. 精灵像素（pattern + attribute → palette index）
+3. 混合优先级规则
+4. 输出最终颜色
+```
+
+为了正确模拟该混合过程，需要理解两种来源像素的“透明”规则与“前后层”逻辑。
+
+------
+
+**背景像素透明规则**
+
+背景像素值 `bg_pixel` 是由 pattern table 和属性表组合得到的 2bit 值（0–3）。
+
+背景实际调色板索引为：
+
+```
+bg_palette_index = (bg_palette << 2) | bg_pixel
+```
+
+其中最关键的一点：
+
+> **当 bg_pixel == 0 时，该背景像素被视为透明像素，不参与混合。**
+
+注意：
+ `0` 并不是实际显示的透明色，它在调色板中仍映射到 `0x3F00`（背景 universal color），
+ 但是在混合阶段这被视为“背景无效像素，可以被前景覆盖”。
+
+------
+
+**精灵像素透明规则**
+
+精灵像素由 Sprite Pattern + Sprite 属性计算得到，也是 2bit 值：
+
+```
+fg_pixel ∈ {0,1,2,3}
+```
+
+Sprite 实际调色板索引：
+
+```
+fg_palette_index = (4 + sprite_palette_id) * 4 + fg_pixel
+```
+
+精灵像素透明判定：
+
+> **Sprite 像素 fg_pixel 为 0 时，精灵像素透明，不参与混合。**
+
+Sprite 属性字段中的位：
+
+| 属性位  | 功能                             |
+| ------- | -------------------------------- |
+| bit 7   | 垂直翻转                         |
+| bit 6   | 水平翻转                         |
+| bit 5   | 优先级（0=在前景，1=在背景后面） |
+| bit 4–2 | 调色板 ID（0–3）                 |
+| bit 1–0 | 未使用                           |
+
+------
+
+**Sprite / 背景混合优先级**
+
+PPU 的最终混合逻辑可写成如下形式（伪代码）：
+
+```
+if (bg_pixel == 0 && fg_pixel == 0)
+    output = universal_background_color;
+else if (bg_pixel == 0 && fg_pixel > 0)
+    output = fg_color;
+else if (bg_pixel > 0 && fg_pixel == 0)
+    output = bg_color;
+else // bg_pixel > 0 && fg_pixel > 0
+{
+    if (sprite_priority == 0)
+        output = fg_color;  // 精灵在前
+    else
+        output = bg_color;  // 精灵在后
+}
+```
+
+**关键点总结**
+
+- 背景透明（bg_pixel=0）→ 精灵优先显示
+- 精灵透明（fg_pixel=0）→ 背景优先显示
+- 两者都不透明 → 使用属性 bit5 的优先级 flag
+- 即使精灵在“后面”，如果背景像素是透明的，也不会遮挡精灵
+   → 背景透明优先级高于优先级标志本身
+
 
 

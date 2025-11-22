@@ -1,6 +1,6 @@
 #include "ppu.h"
 #include "cart.h"
-
+#include <string.h>
 
 #pragma region "registers"
 typedef union {
@@ -165,6 +165,27 @@ static void ppu_internal_write(u16 addr, u8 data)
 
 #pragma endregion
 
+#pragma region "OAM"
+typedef union
+{
+struct
+{
+	u8 y;			// Y position of sprite
+	u8 id;			// ID of tile from pattern memory
+	u8 attribute;	// Flags define how sprite should be rendered
+	u8 x;			// X position of sprite
+};
+u8 bytes[4];
+}  sprite;
+static sprite __oam[64];
+static u8 __oam_addr = 0x00;
+
+void ppu_dma_oam_write(u8 addr, u8 data)
+{
+    ((u8*)__oam)[addr] = data;
+}
+
+#pragma endregion
 
 #pragma region "cpu bus io"
 enum cpu_bus_io
@@ -190,7 +211,11 @@ u8   ppu_bus_read(u16 addr)
         __status.vertical_blank = 0;
         break;
     }
-    case OAM_DATA: { break; }
+    case OAM_DATA: {
+        u8 *ptr = (u8*)__oam;
+        data = ptr[__oam_addr];
+        break; 
+    }
     case PPU_DATA: {
         data = __data_buffer;
         __data_buffer = ppu_internal_read(__vram_addr.reg);
@@ -217,8 +242,12 @@ void ppu_bus_write(u16 addr, u8 data)
         break;
     }
     case PPU_MASK: __mask.reg = data; break;
-    case OAM_ADDR: break;
-    case OAM_DATA: break;
+    case OAM_ADDR: __oam_addr = data; break;
+    case OAM_DATA: {
+        u8 *ptr = (u8*)__oam;
+        ptr[__oam_addr] = data;
+        break;
+    }
     case PPU_SCROLL: break;
     case PPU_ADDR: {
         if (__latch_address == 0) {
@@ -243,7 +272,7 @@ void ppu_bus_write(u16 addr, u8 data)
 
 #pragma endregion
 
-#pragma region "basics"
+// #pragma region "basics"
 #define PIXEL_COLOR_RGB_565(r, g, b) \
     (u16)((((r) >> 3) << 11) | (((g) >> 2) << 5) | ((b) >> 3))
 #define COLOR(r, g, b) PIXEL_COLOR_RGB_565(r, g, b)
@@ -313,6 +342,144 @@ static inline void draw_one_pixel(i16 x, i16 y, u8 palette_index)
     __frame_buffer[y * 256 + x] = __system_palette[palette_index & 0x3F];
 }
 
+
+static inline u16 fg_8x8_tile_lsb_addr(u8 id, u8 y, u8 attr, int scanline)
+{
+	u8 t = (0x08 - ((attr & 0x80) >> 7)) & 0x07; // t is 0b000 or 0b111
+	return __control.pattern_sprite << 12 | id << 4 | (t ^ (scanline - y));
+}
+static inline u16 fg_8x8_tile_msb_addr(u8 id, u8 y, u8 attr,int scanline)
+{
+	u8 t = (0x08 - ((attr & 0x80) >> 7)) & 0x07; // t is 0b000 or 0b111
+	return __control.pattern_sprite << 12 | id << 4 | 0b1000 | (t ^ (scanline - y));
+}
+
+static inline u16 fg_8x16_tile_lsb_addr(u8 id, u8 y, u8 attr, int scanline)
+{
+	u8 t = (0x10 - ((attr & 0x80) >> 7)) & 0x0F; // t is 0b0000 or 0b1111
+	u8 d = (t ^ ((scanline - y) & 0x0F)); // 0x00 - 0x0F
+	return ((id & 0x01) << 12) | (((id & 0xFE) | ((d >> 3) & 1)) << 4) | (d & 0x07);
+}
+static inline u16 fg_8x16_tile_msb_addr(u8 id, u8 y, u8 attr, int scanline)
+{
+	u8 t = (0x10 - ((attr & 0x80) >> 7)) & 0x0F; // t is 0b0000 or 0b1111
+	u8 d = (t ^ ((scanline - y) & 0x0F)); // 0x00 - 0x0F
+	return ((id & 0x01) << 12) | (((id & 0xFE) | ((d >> 3) & 1)) << 4) | 0b1000 | (d & 0x07);
+}
+
+static u8 fg_tile_hflip(u8 bits) 
+{
+    bits = (bits & 0b11110000) >> 4 | (bits & 0b00001111) << 4;
+    bits = (bits & 0b11001100) >> 2 | (bits & 0b00110011) << 2;
+    bits = (bits & 0b10101010) >> 1 | (bits & 0b01010101) << 1;
+    return bits;
+}
+
+static inline bool sprite_over_scanline(int scanline, i16 y) 
+{
+    i16 diff = ((i16)scanline - y);
+    return (diff >= 0 && diff < (__control.sprite_size ? 16 : 8));
+}
+
+u8 bg_pixel(int i, int j)
+{
+    __vram_addr.reg = (((i >> 3) << 5) | (j >> 3));
+    __vram_addr.fine_y = (i & 0x07);
+
+    u8 name = (ppu_internal_read(0x2000 | (__vram_addr.reg & 0x0FFF)));
+    u8 attr = ppu_internal_read(attrib_addr());
+    attr = attrib_component(attr);
+
+    u8 bg_tile_lsb = ppu_internal_read(bg_tile_lsb_addr(name));
+    u8 bg_tile_msb = ppu_internal_read(bg_tile_msb_addr(name));
+
+    u8 bg_attr_lsb = ((attr & 0x01) ? 0xFF : 0x00); // attr 10 -> FF 00
+    u8 bg_attr_msb = ((attr & 0x02) ? 0xFF : 0x00);
+
+    u8 lo = (bg_tile_lsb << (j & 0x07)) & 0x80;
+    u8 hi = (bg_tile_msb << (j & 0x07)) & 0x80;
+    u8 bg_pixel = ((hi > 0) << 1) | (lo > 0);
+
+    lo = (bg_attr_lsb << (j & 0x07)) & 0x80;
+    hi = (bg_attr_msb << (j & 0x07)) & 0x80;
+    u8 bg_palette = ((hi > 0) << 1) | (lo > 0); // bg_palette == attr
+
+    u8 bg_pixel_data = ((bg_palette & 0x03) << 2) | (bg_pixel & 0x03);
+    return bg_pixel_data;
+}
+
+u8 fg_pixel(int i, int j)
+{
+    static u8 fg_tile_lsb[8];
+    static u8 fg_tile_msb[8];
+    static u8 fg_tile_x_latch[8];
+    static u8 fg_tile_attr_latch[8];
+    static sprite oam[8];
+    int scanline = i - 1;
+    if (j == 0) {
+        // sprite evaluation in 1 clock
+        u8 m = 0;
+        memset(oam, 0xFF, sizeof(oam));
+        for (int k = 0; k < 64; k++) {
+            if (!sprite_over_scanline(scanline, __oam[k].y)) {
+                continue;
+            }
+
+            if (m < 8) {
+                oam[m++] = __oam[k];
+            } else {
+                __status.sprite_overflow = 1;
+            }
+        }
+
+        // fetch
+        for (int k = 0; k < 8; k++)
+        {
+            fg_tile_attr_latch[k] = oam[k].attribute;
+            fg_tile_x_latch[k]    = oam[k].x;
+
+            fg_tile_lsb[k] = ppu_internal_read(__control.sprite_size ? 
+                fg_8x16_tile_lsb_addr(oam[k].id, oam[k].y, oam[k].attribute, scanline)
+                : fg_8x8_tile_lsb_addr(oam[k].id, oam[k].y, oam[k].attribute, scanline));
+
+            fg_tile_msb[k] = ppu_internal_read(__control.sprite_size ? 
+                fg_8x16_tile_msb_addr(oam[k].id, oam[k].y, oam[k].attribute, scanline)
+                : fg_8x8_tile_msb_addr(oam[k].id, oam[k].y, oam[k].attribute, scanline));
+            
+            fg_tile_lsb[k] = (fg_tile_attr_latch[k] & 0x40) ? 
+                fg_tile_hflip(fg_tile_lsb[k]) : fg_tile_lsb[k];
+
+            fg_tile_msb[k] = (fg_tile_attr_latch[k] & 0x40) ? 
+                fg_tile_hflip(fg_tile_msb[k]) : fg_tile_msb[k];
+        }
+    }
+
+    // render
+    u8 k = 0;
+    u8 fg_pixel = 0x00;
+    u8 fg_palette = 0x00;
+    u8 fg_priority = 0x00;
+    for (k = 0; k < 8; k++) {
+        if (fg_tile_x_latch[k]) {
+            --fg_tile_x_latch[k];
+            continue;
+        } else {
+            u8 lo = fg_tile_lsb[k] & 0x80; fg_tile_lsb[k] <<= 1;
+            u8 hi = fg_tile_msb[k] & 0x80; fg_tile_msb[k] <<= 1;
+            if (fg_pixel == 0x00) {
+                fg_pixel  = (hi > 0) << 1 | (lo > 0);
+                fg_palette = fg_tile_attr_latch[k] & 0x03;
+                fg_priority = ((fg_tile_attr_latch[k] & 0x20) >> 5);
+            }
+        }
+    }
+
+    if (oam[0].y == __oam[0].y && (fg_pixel & 0x03) > 0) {
+        __status.sprite_hit_zero = 1;
+    }
+    return ((k & 0x07) << 5) | ((fg_priority & 1) << 4) | (fg_palette & 0x03) << 2 | (fg_pixel & 0x03);
+}
+
 #pragma endregion
 
 void ppu_clock()
@@ -345,31 +512,13 @@ LAST_CYCLE_OF_FRAME:
         {
             for (int j = 0; j < 256; ++j) 
             {
-                __vram_addr.reg = (((i >> 3) << 5) | (j >> 3));
-                __vram_addr.fine_y = (i & 0x07);
+                u8 bg_pixel_data = bg_pixel(i, j);
+                u8 fg_pixel_data = fg_pixel(i, j);
 
-                u8 name = (ppu_internal_read(0x2000 | (__vram_addr.reg & 0x0FFF)));
-                u8 attr = ppu_internal_read(attrib_addr());
-                attr = attrib_component(attr);
-
-                u8 bg_tile_lsb = ppu_internal_read(bg_tile_lsb_addr(name));
-                u8 bg_tile_msb = ppu_internal_read(bg_tile_msb_addr(name));
-
-                u8 bg_attr_lsb = ((attr & 0x01) ? 0xFF : 0x00); // attr 10 -> FF 00
-                u8 bg_attr_msb = ((attr & 0x02) ? 0xFF : 0x00);
-
-                {
-                    u8 lo = (bg_tile_lsb << (j & 0x07)) & 0x80;
-                    u8 hi = (bg_tile_msb << (j & 0x07)) & 0x80;
-                    u8 bg_pixel = ((hi > 0) << 1) | (lo > 0);
-
-                    lo = (bg_attr_lsb << (j & 0x07)) & 0x80;
-                    hi = (bg_attr_msb << (j & 0x07)) & 0x80;
-                    u8 bg_palette = ((hi > 0) << 1) | (lo > 0); // bg_palette == attr
-
-                    u8 bg_pixel_data = ((bg_palette & 0x03) << 2) | (bg_pixel & 0x03);
-                    draw_one_pixel(j, i, ppu_internal_read(0x3F00 | (bg_pixel_data)));
-                }
+                if ((fg_pixel_data & 0x03) == 0 || ((fg_pixel_data & 0x10) > 0 && ((fg_pixel_data & 0x03) != 0)))
+                    draw_one_pixel(j, i, ppu_internal_read(0x3F00 | (bg_pixel_data & 0x0F)));
+                else
+                    draw_one_pixel(j, i, ppu_internal_read(0x3F10 | (fg_pixel_data & 0x0F)));
             }
         }
         __frame_complete = true;

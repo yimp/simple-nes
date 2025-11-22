@@ -6,6 +6,9 @@
 u8   ppu_bus_read(u16 addr);
 void ppu_bus_write(u16 addr, u8 data);
 
+// dma
+void ppu_dma_oam_write(u8 addr, u8 data);
+
 // basics
 void ppu_clock();
 bool ppu_nmi_triggered();

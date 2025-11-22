@@ -1,6 +1,7 @@
 #include "bus.h"
 #include "cart.h"
 #include "ppu.h"
+#include "dma.h"
 
 enum adress_space
 {
@@ -44,15 +45,31 @@ uint8_t bus_read(uint16_t addr)
     return 0x00;
 }
 
+void write_to_apu(u16 addr, u8 data);
 void bus_write(uint16_t addr, uint8_t data) 
 {
     switch (bus_memory_map(addr))
     {
     case RAM:  __ram[addr & 0x7FF] = data; return;
     case PPUIO: ppu_bus_write(addr, data); return;
-    case APUIO: return;
+    case APUIO: write_to_apu(addr, data); return;
     case CARTIO: cart_write(addr, data);
     default: break;
     }
     return;
+}
+
+
+enum apu_io
+{
+    OAM_DMA         = 0x0014,
+};
+
+void write_to_apu(u16 addr, u8 data)
+{
+    switch (addr & 0x00FF)
+    {
+    case OAM_DMA: dma_active(data, 0); break;
+    default: break;
+    }
 }
