@@ -2945,5 +2945,561 @@ else // bg_pixel > 0 && fg_pixel > 0
 - 即使精灵在“后面”，如果背景像素是透明的，也不会遮挡精灵
    → 背景透明优先级高于优先级标志本身
 
+## 6.7 PPU时序
 
+### 6.7.1 概述
 
+一帧画面总共有262条扫描线。
+
+| 扫描线类型     | 范围      | 作用                                   |
+| -------------- | --------- | -------------------------------------- |
+| Pre-render     | -1 或 261 | 初始化滚动寄存器，清除 flags           |
+| Visible        | 0–239     | 输出像素，背景与精灵 pipeline 工作     |
+| Post-render    | 240       | 空闲线                                 |
+| Vertical blank | 241–260   | 设置 vblank flag，允许 NMI，PPU 不渲染 |
+
+每条扫描线 341 个周期，Pre-render和Visible扫描线的周期通常分为下面几个阶段：
+
+| 周期范围 | 作用                                         |
+| -------- | -------------------------------------------- |
+| 0        | idle（无意义：通常是 “cycle 1” 的前一个）    |
+| 1–256    | 背景像素读取（tile 取数 + shift register）   |
+| 257–320  | 精灵 pattern fetch                           |
+| 321–336  | 下一 tile 的背景取数                         |
+| 337–340  | 预取周期（取无效 tile，保持滚动 continuity） |
+
+### 6.7.2 背景渲染流水线（Background pipeline）
+
+PPU 用一种**严格的逐像素流水线机制**来生成背景像素。其核心思想是：
+
+> **PPU 以 8 像素为单位抓取 tile 数据，但以 1 像素为单位输出像素。
+>  为此，它需要一套移位寄存器，每个像素时钟自动右移一次。**
+
+背景渲染流水线由两类寄存器组成：
+
+- ###### **Tile Pattern Shifters（图案低/高位移位寄存器）**
+- **Attribute Shifters（属性低/高位 latch + 移位寄存器）**
+
+并且配合一套 tile fetch pipeline 在“后台”不断填充 shifter。
+
+下面按流程进行说明。
+
+------
+
+**1) Pattern Shifters（图案移位寄存器）**
+
+PPU 维护两个 16bit 的 Pattern Shifter：
+
+- **BGPatternLoShifter (16bit)**
+- **BGPatternLoShifter (16bit)**
+
+每 8 个像素（一个 tile 宽度）会加载一次数据：
+
+```
+bit15......................................bit0
+←----------- 左移方向（像素输出方向） -----------←
+```
+
+高位（bit15）代表当前要输出的像素，下一个像素时该寄存器会左移一次。
+
+加载方式：
+
+- 本 tile 的 low pattern byte（8 bit）加载到**LoShifter**的 bit0–bit7
+- 本 tile 的 high pattern byte（8 bit）加载到**HiShifter** bit0–bit7
+- bit15–bit8 保留为上次加载的还未渲染 的tile数据，但会在下一周期被新数据覆盖（行为等价于：每次加载，低字节被填充，高字节是下一轮移位后丢弃）
+
+总结：**Pattern shifter 以 1px/clock 速率左移，每 8px 加载一次新 tile 数据。**
+
+------
+
+**2) Attribute Shifters（属性移位寄存器）**
+
+Tile 的属性值（Palette index 的高两位）不会像 pattern 那样以字节形式加载，它是：
+
+- 一个 tile（8 像素）共享同一个两位属性值
+- 属性内容通过 latch 锁存，然后复制到 attribute shifter 的低位区间
+
+与 Pattern Shifter 相同，也有两个 16bit 移位寄存器：
+
+- **BGAttrLoShift (16bit)**
+- **BGAttrHiShift (16bit)**
+
+加载行为：
+
+- 当新 tile 即将开始（每 8 像素），将 latch 的值扩展成 8 个重复 bit（形成一个 8bit pattern）填入 shifter 的低字节（bit0–bit7）
+
+例如：
+
+如果本 tile 属性为 0b10，则高属性 shifter 的 bit0–bit7 全部设为 1。则低属性 shifter 的 bit0–bit7 全部设为 0。
+
+------
+
+**3) 每个像素输出逻辑**
+
+在每一个 PPU 时钟，背景流水线会做三件事：
+
+1. **从 Shifters 的 bit15 取出当前像素位**
+
+   - `bg_bit_lo = BGPatternLoShift >> 15`
+   - `bg_bit_hi = BGPatternHiShift >> 15`
+   - 构成 2bit 背景 pattern index
+
+2. **从 Attribute Shifters 的 bit15 取出属性高位**
+
+   - `pal_bit_lo = BGAttrLoShift >> 15`
+   - `pal_bit_hi = BGAttrHiShift >> 15`
+
+3. **组合得到背景像素的最终 4bit palette index**
+
+   ```
+   palette_index = (pal_bit_hi << 3) | (pal_bit_lo << 2) |
+                   (bg_bit_hi  << 1) | (bg_bit_lo  << 0);
+   ```
+
+注意：
+
+- 如果 `(bg_bit_hi|bg_bit_lo) == 0`，说明背景像素透明，需要 Sprite Pipeline 决定最终像素（混合阶段）。
+
+在输出完一个像素后：
+
+- **4 个 Shifters（pattern low/high + attribute low/high）全部左移一位**
+- bit0 被丢弃
+- 左移后 bit15 将输出下一个像素
+
+这个操作在每一个 PPU dot（像素时钟）都会自动发生。
+
+------
+
+**4) Tile Fetch Pipeline（tile 预取流水线）**
+
+背景移位寄存器依赖 tile-fetch pipeline 在内部填充图案和属性数据。在每 **8 个 PPU 时钟**，PPU 会抓取一组 tile 数据（4 步）：
+
+| 时钟周期 (mod 8) | 动作                               |
+| ---------------- | ---------------------------------- |
+| 1                | 读取 Name Table byte（tile index） |
+| 3                | 读取 Attribute Table byte          |
+| 5                | 读取 Pattern Low byte              |
+| 7                | 读取 Pattern High byte             |
+
+在周期 7 → 下一 tile 开始前，将读取到的数据写入：
+
+- Pattern Shifters (bit8–15)
+- Attribute Shifters (bit8–15)（经 latch 扩展）
+
+**下一轮像素输出即可用到这些数据。**
+
+------
+
+**5) Fine X 寄存器**
+
+由于背景流水线永远以 8px 对齐加载 tile，但屏幕左侧可能需要从 tile 中间开始输出像素——因此需要 **Fine X（0–7）**：
+
+- Fine X 控制每像素移位时 **背景 shifter 的输出偏移**
+- 在硬件上表现为：“左移时机”会被 Fine X 延迟
+
+简单表述：
+
+> Fine X == 3 表示 tile 的 pattern shifters 实际输出从第 4 个像素开始。
+
+实现模拟：可以在 background 输出阶段，从 shifter 的 bit(15 - fine_x) 读出当前像素而不是 bit15。这是真实 PPU 行为的等价模拟方式。
+
+------
+
+**6) 总结**
+
+背景 shift pipeline 的核心机制：
+
+1. **PPU 用两对 16bit 移位寄存器维护背景 pattern 和属性数据。**
+2. **每 8 像素预取一次 tile 数据，填入 shifter 下半部分。**
+3. **每像素左移一次，并从 bit15 输出当前像素数据。**
+4. **属性数据通过 latch + shifter 决定该 tile 所属的 palette。**
+5. **Fine X 决定 shifter 输出位置偏移。**
+
+背景移位流水线允许 PPU 在极低成本下完成逐像素背景渲染，同时保持 tile-based 缓存结构——这也是当年硬件设计的关键。
+
+### 6.7.2 精灵渲染的精确时序
+
+PPU 的精灵渲染逻辑分为三个部分：
+
+1. **Secondary OAM 清除阶段（扫描线 dot 1–64）**
+2. **精灵评估阶段（dot 65–256）**
+3. **精灵 pattern fetch + sprite pipeline（dot 257–340 + next scanline）**
+
+这些阶段是在**每条可见扫描线（0–239）**上重复执行的；在隐藏/预渲染扫描线上行为略有不同，主要关注可见扫描线。整个流程严谨到“每 2 个 clock 对应一次 OAM 读写操作”， 理解这部分时序是写 cycle-perfect 模拟器最关键的一步。
+
+```
+上一条扫描线：
+-----------------------------------------
+Dot 1~64    : 清除 Secondary OAM
+Dot 65~256  : 精灵评估
+Dot 257~320 : 精灵 pattern fetch
+Dot 321~340 : 背景 tile fetch
+
+下一条扫描线：
+-----------------------------------------
+Dot 1~256   : Sprite Pipeline（输出像素）
+```
+
+------
+
+**1) Dot 1–64：Secondary OAM 清除阶段（OAM2 清零）**
+
+周期 1–64：PPU 以 **每 2 个 cycle 写一个 0xFF** 的方式清空 secondary OAM：
+
+| dot  | 行为                                             |
+| ---- | ------------------------------------------------ |
+| 1    | （空闲：历史 bug，实际不访问 OAM）               |
+| 2–64 | 以每 2 cycle 为单位将 0xFF 写入 OAM2，共 32 字节 |
+
+其写法不是一次性清空，而是：
+
+```
+for (i in 0..31):
+    dot = 2 + i*2
+    OAM2[i] = 0xFF
+```
+
+------
+
+**2) Dot 65–256：精灵评估（Sprite Evaluation）**
+
+NES 最经典的难点：**精灵评估不是“找到≤8个可见精灵”这么简单，而是一个严格的硬件状态机！**
+
+PPU 使用如下流程：
+
+- OAM 的两个指针：
+  - **OAMADDR（n）**：指向正在检查的精灵
+  - **OAM2ADDR（m）**：指向 OAM2 将写入的位置（0–31）
+
+评估过程每次处理一个 OAM 条目的第一字节（Y coordinate）。
+ 行为分为三种状态：
+
+**状态 1：寻找可见精灵（Always）**
+
+从 dot 65 开始：
+
+```
+每 2 个 dot：
+
+读 OAM[n].Y → 与 scanline 比较 → 判断精灵是否在范围内
+```
+
+判断规则：
+
+```
+if (0 <= scanline - OAM[n].Y < sprite_height) → 精灵可见
+```
+
+如果可见：
+
+- 如果 OAM2 还有空位（≤7 个精灵）→ 状态 2
+- 如果 OAM2 已满 → 进入“overflow 搜索阶段”（状态 3）
+
+------
+
+**状态 2：复制整条 OAM 条目到 OAM2（这也是严格时序！）**
+
+当判定一个精灵可见（Y 命中）时：
+
+接下来 **6 个 dot（3 次 read/write）**：
+
+| dot step | 操作                            |
+| -------- | ------------------------------- |
+| +0       | 已读取 Y（match）               |
+| +2       | 读 OAM[n].tile → 写入 OAM2[m+1] |
+| +4       | 读 OAM[n].attr → 写入 OAM2[m+2] |
+| +6       | 读 OAM[n].x    → 写入 OAM2[m+3] |
+
+最终写入 OAM2 的 4 字节为：
+
+```
+[y, tile_index, attr, x]
+```
+
+完成后：
+
+```
+n += 4
+m += 4
+（准备处理下一个精灵条目）
+```
+
+------
+
+**状态 3：Sprite Overflow 搜索（真实 PPU 的 BUG 源头）**
+
+real 2C02 的 overflow 行为 **不是简单的“第9个精灵时设置 overflow flag”**，
+ 而是：
+
+> 当 OAM2 已装满 8 条精灵条目后，如果再找到一个精灵的第一个字节（Y）满足命中，会进入“错误的复制循环”，反复读 OAM，导致奇怪的比特行为，从而触发 overflow flag。
+
+行为：
+
+- 继续遍历 OAM（每精灵 2 dot）
+- 但不再写入 OAM2
+- 只进行 Y 的匹配循环
+- 一旦找到一个命中的 Y → 设置 overflow flag
+- 继续遍历直到 dot 256 结束
+
+这个行为的模拟方式通常分两种：
+
+**简易模拟法（非 cycle-accurate）：**
+
+```
+if (在评估过程中找到9th命中精灵):
+    set sprite_overflow = true
+```
+
+**精确模拟法（cycle-accurate）：**
+
+必须实现真实的 OAM read/内部状态机，不展开这里（可以之后为你写完整状态机版）。
+
+------
+
+**3) Dot 257–320：精灵 Pattern Fetch（装载 sprite shifters）**
+
+从 dot 257 开始，PPU 对 secondary OAM 中的每个精灵进行 **图案抓取**：
+
+每个精灵需要抓 pattern 的 LSB/MSB 共 2 字节，再加上属性 latch。
+
+流程：
+
+| dot     | 动作                           |
+| ------- | ------------------------------ |
+| 257–264 | 精灵 #0 pattern fetch（8 dot） |
+| 265–272 | 精灵 #1                        |
+| ...     | ...                            |
+| 313–320 | 精灵 #7                        |
+
+每个精灵占 8 个 dot：
+
+```
+dot+0 : read sprite_y (内部)
+dot+2 : read tile index
+dot+4 : read attr
+dot+6 : read pattern low
+dot+8 : read pattern high
+```
+
+得到的数据写入：
+
+```
+sprite_pattern_lo[i]   ← fetched low byte
+sprite_pattern_hi[i]   ← fetched high byte
+sprite_attr[i]         ← attribute（不移位）
+sprite_x_counter[i]    ← sprite 的 x 值（延迟计数器）
+```
+
+sprite_x_counter 会在渲染期间对 sprite shifter 的输出进行延迟控制。
+
+------
+
+**4) Dot 321–340：下一 tile 的背景 fetch（对精灵无影响）**
+
+此阶段精灵流水线已准备就绪。
+
+------
+
+**5) 下一扫描线的 Dot 1–256：Sprite Pipeline（精灵像素流水线）**
+
+在下一条扫描线实际渲染像素时，sprite pipeline 与 background pipeline 共同参与像素合成。
+
+每个 cycle（dot 1–256）：
+
+1. **对每个精灵（0–7）进行 sprite_x_counter 处理：**
+   - 若 counter > 0，则 counter--，但不 shift
+   - 若 counter == 0，则每 cycle shift 一次 pattern shifter
+2. **从每个精灵的 shifter 中读取本像素的 sprite_pixel（0–3）**
+3. **决定哪一个精灵“赢”出现在屏幕上：**
+   - sprite_pixel==0 → 透明，忽略
+   - 最前面的非透明精灵获胜（按 OAM 顺序）
+   - 精灵 attr 的 bit5 决定前后景：
+     - bit5=0 → 精灵前景优先
+     - bit5=1 → 精灵在背景后面（除非背景透明）
+4. **Sprite 0 Hit 判定逻辑：**
+   - 当前像素非透明背景（bg_pixel!=0）
+   - 当前像素为 sprite0 的非透明像素（spr_pixel!=0）
+   - 位于可见区（x>=1 且 x<=255）
+   - 才设置 sprite0_hit flag
+
+Sprite pipeline 是在下一扫描线上运行，因此：
+
+- **评估和 pattern fetch 在“前一条扫描线”进行**
+- **渲染发生在“下一条扫描线”**
+
+这是精灵系统最重要的结构特征。
+
+------
+
+## 6.8 背景滚动
+
+> - Loopy v / t / x（通常写作 v、t、x、w）各自的作用
+> - v/t/h（水平）与 v/t/vt（垂直）滚动是如何在扫描线上自动执行的
+> - 这些寄存器在背景 fetch pipeline 中 *何时*、*如何* 起作用
+> - 每个扫描线的关键时刻（horizontal/vertical increments）的时间点
+
+------
+
+### 6.8.1 Loopy Register 简述
+
+PPU 内部维护３个用于地址生成和滚动的寄存器：
+
+- **v**：当前渲染位置的 VRAM 地址（15 位）
+- **t**：临时 VRAM 地址（15 位）
+- **x**：fine X（0–7）
+- **w**：write toggle（0/1）
+
+v 与 t 的地址格式（Loopy address format）：
+
+```
+yyy NN YYYYY XXXXX
+||| || ||||| +++++-- coarse X (tile x index)
+||| || +++++-------- coarse Y (tile y index)
+||| ++-------------- nametable select (horizontal / vertical)
++++----------------- fine Y (pixel-in-tile vertical offset)
+```
+
+其中：
+
+- `fine Y = yyy (3bit)`
+- `coarse X = XXXXX (5bit)`
+- `coarse Y = YYYYY (5bit)`
+- `nametable = NN (2bit)`
+
+**v 是背景流水线实际使用的地址。**
+ 每当 pipeline 需要读取：
+
+- nametable byte
+- attribute byte
+- pattern low byte
+- pattern high byte
+
+都会从 **v** 解析出当前 tile 所在的 VRAM 地址。
+
+------
+
+### 6.8.2 Loopy Register 与背景流水线的协作总览
+
+背景渲染包含两个维度的自动滚动：
+
+1. **水平滚动**：每 8 像素（每 tile 宽度） v 的 coarse X 增加
+2. **垂直滚动**：每扫描线结束时 v 的 coarse Y / fine Y 自动增加
+3. **特殊的 v ← t 操作**：在每一行开始 & 每一帧开始时使用
+
+这些行为全部嵌在 background fetch pipeline 的**固定时序**中，因此能够做到：
+ “PPU 自动渲染背景而无需 CPU 每像素干预”。
+
+------
+
+### 6.8.3 水平滚动：coarse X 的自动递增
+
+**1) 每 8 像素，v.coarseX 与 v.nametableX 自动滚动**
+
+在**每个可见扫描线的 dot 1~256**，背景流水线以 8 像素为周期抓取 tile。
+ 每当 pipeline 完成一次 tile fetch（mod 8 == 7），**v 的水平部分自动递增**：
+
+伪代码：
+
+```
+if (v.coarseX == 31) {
+    v.coarseX = 0;
+    v.nametableX ^= 1;     // 切换水平 nametable
+} else {
+    v.coarseX++;
+}
+```
+
+这意味着：
+
+- 当 coarseX=31 向右溢出时，自动切换(水平) nametable
+- 可以实现横向无缝卷轴
+
+**2) 水平重载：v 的水平位 ← t 的水平位（scanline 开始）**
+
+在 **每个可见扫描线的 dot 257**：（准确点：scanline 0–239 和 pre-render line，dot=257）
+
+PPU 执行：
+
+```
+v.coarseX    = t.coarseX
+v.nametableX = t.nametableX
+```
+
+作用：
+
+- 每行开始前，把 CPU 设定的水平滚动参数应用到渲染寄存器 v
+- 后续本行的背景渲染全部依据 v 滚动
+
+------
+
+### 6.8.3 垂直滚动：fine Y / coarse Y 的自动递增
+
+**1) 垂直递增发生在扫描线结束（dot 256）**
+
+当 dot = 256 时，PPU 执行垂直滚动递增：
+
+伪代码：
+
+```
+if (v.fineY < 7) {
+    v.fineY++;
+} else {
+    v.fineY = 0;
+    if (v.coarseY == 29) {
+        v.coarseY = 0;
+        v.nametableY ^= 1;   // 切换垂直 nametable
+    } else if (v.coarseY == 31) {
+        v.coarseY = 0;       // 忽略31这一行（不可显示）
+    } else {
+        v.coarseY++;
+    }
+}
+```
+
+解释：
+
+- fineY 在 tile 内递增，滚到 7 后，进入下一个 tile 行
+- coarseY=29 → 下一个 coarseY=30 是不可见区域，需要切换 nametable
+- coarseY=31 是保留区域，不用于显示，递增时直接归零
+
+**2) 垂直重载：v 的垂直位 ← t 的垂直位（scanline 0）**
+
+在 **预渲染扫描线（scanline -1，也称 261 行） dot=280~304**，PPU 执行：
+
+```
+v.coarseY    = t.coarseY
+v.fineY      = t.fineY
+v.nametableY = t.nametableY
+```
+
+这是 CPU/VBlank 期间写入 t 的垂直滚动参数正式生效的时刻。
+
+------
+
+### 6.8.4 CPU 对 PPU 寄存器写操作（t 寄存器修改流程）
+
+当 CPU 写入滚动寄存器 2005/2006 时，Loopy 寄存器的行为：
+
+写 $2005（Scroll）时：
+
+1. **第一次写（w=0）**：设置
+   - `t.coarseX = scroll_x >> 3`
+   - `x = scroll_x & 7`（fine X）
+   - `t.fineY = scroll_y & 7`
+2. **第二次写（w=1）**：设置
+   - `t.coarseY = scroll_y >> 3`
+
+写 $2006（Addr）时：
+
+1. **第一次写（w=0）**：写入 t 的高 6bit
+2. **第二次写（w=1）**：写入 t 的低 8bit
+   - 同时 `v = t` 生效（立即更新 v）
+
+w（write toggle）：
+
+- 每次写入 2005 或 2006 后 w 在 0 ↔ 1 间切换
+- 写 $2002 时 w 重置为 0（典型 VBlank 读时机）
+
+t 是 CPU 配置用的临时寄存器；
+ v 是渲染时 PPU 实际使用的寄存器；
+ 所以只有特定时刻（257，280–304）才会把 t 的内容拷贝到 v。
