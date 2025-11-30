@@ -58,7 +58,7 @@ static status_register          __status;
 static control_register         __control;
 static loopy_address_register   __vram_addr;
 static loopy_address_register   __tram_addr;
-
+static u8                       __fine_x;
 
 #pragma endregion
 
@@ -95,7 +95,21 @@ static u8 __latch_address = 0;
 static u8 __vram[0x800];
 static u8 __pram[0x020];
 
-static u16 mirror_vram_addr(u16 addr) { return addr & 0x07FF; }
+static u16 mirror_vram_addr(u16 addr) 
+{ 
+    addr &= 0x0FFF;
+    switch (cart_ppu_get_mirror()) 
+	{
+	case CartMirrorHorizontal: // NT0,NT1 → vram[0x000~0x3FF], NT2,NT3 → vram[0x400~0x7FF]
+		return (((addr >> 10) >> 1) << 10) | (addr & 0x3FF);
+	case CartMirrorVertical: // NT0,NT2 → vram[0x000~0x3FF], NT1,NT3 → vram[0x400~0x7FF]
+		return (((addr >> 10) & 1) << 10) | (addr & 0x3FF);
+	default: 
+        break;
+    }
+    return 0;
+}
+
 static u8 ppu_read_vram(u16 addr)
 {
     return __vram[mirror_vram_addr(addr & 0x0FFF)];
@@ -179,6 +193,7 @@ u8 bytes[4];
 }  sprite;
 static sprite __oam[64];
 static u8 __oam_addr = 0x00;
+static sprite __2nd_oam[8];
 
 void ppu_dma_oam_write(u8 addr, u8 data)
 {
@@ -248,7 +263,19 @@ void ppu_bus_write(u16 addr, u8 data)
         ptr[__oam_addr] = data;
         break;
     }
-    case PPU_SCROLL: break;
+    case PPU_SCROLL: {
+        if (__latch_address == 0) {
+			__fine_x = data & 0x07;
+			__tram_addr.coarse_x = data >> 3;
+			__latch_address = 1;
+		}
+		else {
+			__tram_addr.fine_y = data & 0x07;
+			__tram_addr.coarse_y = data >> 3;
+			__latch_address = 0;
+		}
+		break;
+    }
     case PPU_ADDR: {
         if (__latch_address == 0) {
             __tram_addr.reg = ((data & 0x3F) << 8) | (__tram_addr.reg & 0x00FF);
@@ -381,117 +408,338 @@ static inline bool sprite_over_scanline(int scanline, i16 y)
     return (diff >= 0 && diff < (__control.sprite_size ? 16 : 8));
 }
 
-u8 bg_pixel(int i, int j)
+static u16 __bg_tile_lo_shifter    = 0x0000;
+static u16 __bg_tile_hi_shifter    = 0x0000;
+static u16 __bg_attr_lo_shifter    = 0x0000;
+static u16 __bg_attr_hi_shifter    = 0x0000;
+
+static u8  __fg_tile_lsb[8];
+static u8  __fg_tile_msb[8];
+static u8  __fg_tile_x_latch[8];
+static u8  __fg_tile_attr_latch[8];
+static u8  __fg_tile_lsb_shifters[8];
+static u8  __fg_tile_msb_shifters[8];
+
+static void bg_fetch(int cycle)
 {
-    __vram_addr.reg = (((i >> 3) << 5) | (j >> 3));
-    __vram_addr.fine_y = (i & 0x07);
+    static u8 bg_name_latch = 0x00;
+    static u8 bg_attr_latch = 0x00;
+    static u8 bg_tile_lsb_latch = 0x00;
+    static u8 bg_tile_msb_latch = 0x00;
+    switch (cycle & 7)
+    {
+    case 1: // cycle 1, 2: fetch data from nametable
+        bg_name_latch =  (ppu_internal_read(0x2000 | (__vram_addr.reg & 0x0FFF)));
+        break;
+    case 3: // cycle 3, 4: fetch data from attribute-table
+        bg_attr_latch = ppu_internal_read(attrib_addr());
+        bg_attr_latch = attrib_component(bg_attr_latch);
+        break;
+    case 5: // cycle 5, 6: fetch pattern data from chr
+        bg_tile_lsb_latch =  ppu_internal_read(bg_tile_lsb_addr(bg_name_latch));
+        break;
+    case 7: // cycle 7, 8: fetch pattern data from chr
+        bg_tile_msb_latch =  ppu_internal_read(bg_tile_msb_addr(bg_name_latch));
+        break;
+    case 0: // cycle 8, 16, 24...: load data in latches to shift registers
+        __bg_tile_lo_shifter = (__bg_tile_lo_shifter & 0xFF00) | bg_tile_lsb_latch;
+        __bg_tile_hi_shifter = (__bg_tile_hi_shifter & 0xFF00) | bg_tile_msb_latch;
 
-    u8 name = (ppu_internal_read(0x2000 | (__vram_addr.reg & 0x0FFF)));
-    u8 attr = ppu_internal_read(attrib_addr());
-    attr = attrib_component(attr);
-
-    u8 bg_tile_lsb = ppu_internal_read(bg_tile_lsb_addr(name));
-    u8 bg_tile_msb = ppu_internal_read(bg_tile_msb_addr(name));
-
-    u8 bg_attr_lsb = ((attr & 0x01) ? 0xFF : 0x00); // attr 10 -> FF 00
-    u8 bg_attr_msb = ((attr & 0x02) ? 0xFF : 0x00);
-
-    u8 lo = (bg_tile_lsb << (j & 0x07)) & 0x80;
-    u8 hi = (bg_tile_msb << (j & 0x07)) & 0x80;
-    u8 bg_pixel = ((hi > 0) << 1) | (lo > 0);
-
-    lo = (bg_attr_lsb << (j & 0x07)) & 0x80;
-    hi = (bg_attr_msb << (j & 0x07)) & 0x80;
-    u8 bg_palette = ((hi > 0) << 1) | (lo > 0); // bg_palette == attr
-
-    u8 bg_pixel_data = ((bg_palette & 0x03) << 2) | (bg_pixel & 0x03);
-    return bg_pixel_data;
+        __bg_attr_lo_shifter = (__bg_attr_lo_shifter & 0xFF00) | ((bg_attr_latch & 0x01) ? 0xFF : 0x00);
+        __bg_attr_hi_shifter = (__bg_attr_hi_shifter & 0xFF00) | ((bg_attr_latch & 0x02) ? 0xFF : 0x00);
+    default:
+        break;
+    }
 }
 
-u8 fg_pixel(int i, int j)
+static void bg_shift()
 {
-    static u8 fg_tile_lsb[8];
-    static u8 fg_tile_msb[8];
-    static u8 fg_tile_x_latch[8];
-    static u8 fg_tile_attr_latch[8];
-    static sprite oam[8];
-    int scanline = i - 1;
-    if (j == 0) {
-        // sprite evaluation in 1 clock
-        u8 m = 0;
-        memset(oam, 0xFF, sizeof(oam));
-        for (int k = 0; k < 64; k++) {
-            if (!sprite_over_scanline(scanline, __oam[k].y)) {
-                continue;
-            }
+    if (__mask.render_background) 
+    {
+        __bg_attr_lo_shifter <<= 1;
+        __bg_attr_hi_shifter <<= 1;
+        __bg_tile_lo_shifter <<= 1;
+        __bg_tile_hi_shifter <<= 1;
+    }
+}
 
-            if (m < 8) {
-                oam[m++] = __oam[k];
-            } else {
-                __status.sprite_overflow = 1;
-            }
-        }
+static void nt_move_x()
+{
+	if (__mask.render_background || __mask.render_sprites)
+	{
+		if (__vram_addr.coarse_x == 31)
+		{
+			__vram_addr.coarse_x = 0;
+			__vram_addr.nametable_x = ~__vram_addr.nametable_x;
+		}
+		else
+		{
+			__vram_addr.coarse_x++;
+		}
+	}    
+}
 
-        // fetch
-        for (int k = 0; k < 8; k++)
+static void nt_move_y()
+{
+    if (__mask.render_background || __mask.render_sprites)
+    {
+        if (__vram_addr.fine_y < 7)
         {
-            fg_tile_attr_latch[k] = oam[k].attribute;
-            fg_tile_x_latch[k]    = oam[k].x;
-
-            fg_tile_lsb[k] = ppu_internal_read(__control.sprite_size ? 
-                fg_8x16_tile_lsb_addr(oam[k].id, oam[k].y, oam[k].attribute, scanline)
-                : fg_8x8_tile_lsb_addr(oam[k].id, oam[k].y, oam[k].attribute, scanline));
-
-            fg_tile_msb[k] = ppu_internal_read(__control.sprite_size ? 
-                fg_8x16_tile_msb_addr(oam[k].id, oam[k].y, oam[k].attribute, scanline)
-                : fg_8x8_tile_msb_addr(oam[k].id, oam[k].y, oam[k].attribute, scanline));
-            
-            fg_tile_lsb[k] = (fg_tile_attr_latch[k] & 0x40) ? 
-                fg_tile_hflip(fg_tile_lsb[k]) : fg_tile_lsb[k];
-
-            fg_tile_msb[k] = (fg_tile_attr_latch[k] & 0x40) ? 
-                fg_tile_hflip(fg_tile_msb[k]) : fg_tile_msb[k];
+            __vram_addr.fine_y++;
+        }
+        else
+        {
+            __vram_addr.fine_y = 0;
+            if (__vram_addr.coarse_y == 29)
+            {
+                __vram_addr.coarse_y = 0;
+                __vram_addr.nametable_y = ~__vram_addr.nametable_y;
+            }
+            else if (__vram_addr.coarse_y == 31)
+            {
+                __vram_addr.coarse_y = 0;
+            }
+            else
+            {
+                __vram_addr.coarse_y++;
+            }
         }
     }
+}
 
-    // render
-    u8 k = 0;
+static void nt_copy_x(void)
+{
+    if (__mask.render_background || __mask.render_sprites)
+    {
+        __vram_addr.nametable_x = __tram_addr.nametable_x;
+        __vram_addr.coarse_x    = __tram_addr.coarse_x;
+    }
+};
+
+static void nt_copy_y(void)
+{
+    if (__mask.render_background || __mask.render_sprites)
+    {
+        __vram_addr.fine_y      = __tram_addr.fine_y;
+        __vram_addr.nametable_y = __tram_addr.nametable_y;
+        __vram_addr.coarse_y    = __tram_addr.coarse_y;
+    }
+};
+
+
+u8 bg_pixel()
+{
+    u8 bg_pixel = 0x00;
+    u8 bg_palette = 0x00;
+    u16 bit_mux = 0x8000 >> __fine_x;
+    bg_pixel   = ((((__bg_tile_hi_shifter & bit_mux) > 0) << 1) | ((__bg_tile_lo_shifter & bit_mux) > 0));
+    bg_palette = ((((__bg_attr_hi_shifter & bit_mux) > 0) << 1) | ((__bg_attr_lo_shifter & bit_mux) > 0));
+    return (bg_palette << 2) | bg_pixel;
+}
+
+
+static void sprite_evaluation_step(int scanline, int cycle)
+{
+    static u8 n = 0;
+    static u8 m = 0;
+    static u8 offset = 0;
+    if (cycle == 65)
+    {
+        memset(__2nd_oam, 0xFF, sizeof(__2nd_oam));
+        m = 0; n = 0; offset = 0;
+    }
+
+    if (n >= 64) return;
+
+    if ((cycle & 1) == 1 && offset == 0) {
+        if (!sprite_over_scanline(scanline, __oam[n].y))
+        {
+            n++;
+            offset = 0;
+            return;
+        }
+
+        if (m < 8)
+        {
+            __2nd_oam[m].bytes[offset] = __oam[n].y;
+        }
+
+        offset++;
+    }
+
+    if ((cycle & 1) == 1 && offset > 0) {
+        if (m < 8) {
+            __2nd_oam[m].bytes[offset] = __oam[n].bytes[offset];
+            offset = (offset + 1) & 0x03;
+            m += (offset == 0);
+            n += (offset == 0);
+        }
+        else {
+            __status.sprite_overflow = 1;
+            n++;
+        }
+    }
+}
+
+static void fg_fetch(int scanline, int cycle)
+{
+    static u8 n = 0;
+    static u8 fg_tile_lsb_latch = 0x00;
+    static u8 fg_tile_msb_latch = 0x00;
+    switch (cycle & 7)
+    {
+    case 1: // cycle 1, 2
+        break;
+    case 3: // attr
+        __fg_tile_attr_latch[n] = __2nd_oam[n].attribute;
+        break;
+    case 4:
+        __fg_tile_x_latch[n] = __2nd_oam[n].x;
+        break;
+    case 5: // pattern lsb
+        fg_tile_lsb_latch = ppu_internal_read(__control.sprite_size ? 
+            fg_8x16_tile_lsb_addr(__2nd_oam[n].id, __2nd_oam[n].y, __2nd_oam[n].attribute, scanline)
+            : fg_8x8_tile_lsb_addr(__2nd_oam[n].id, __2nd_oam[n].y, __2nd_oam[n].attribute, scanline));
+        if (__2nd_oam[n].y == 0xFF)
+            fg_tile_lsb_latch = 0x00;
+        break;
+    case 7: // pattern msb
+        fg_tile_msb_latch = ppu_internal_read(__control.sprite_size ? 
+            fg_8x16_tile_msb_addr(__2nd_oam[n].id, __2nd_oam[n].y, __2nd_oam[n].attribute, scanline)
+            : fg_8x8_tile_msb_addr(__2nd_oam[n].id, __2nd_oam[n].y, __2nd_oam[n].attribute, scanline));
+        if (__2nd_oam[n].y == 0xFF)
+            fg_tile_msb_latch = 0x00;
+        break;
+    case 0: // load shifters
+        __fg_tile_lsb_shifters[n] = (__fg_tile_attr_latch[n] & 0x40) ? 
+            fg_tile_hflip(fg_tile_lsb_latch) : fg_tile_lsb_latch;
+
+        __fg_tile_msb_shifters[n] = (__fg_tile_attr_latch[n] & 0x40) ? 
+            fg_tile_hflip(fg_tile_msb_latch) : fg_tile_msb_latch;
+        n = (n + 1) & 0x07;
+    default:
+        break;
+    }
+}
+
+static void fg_shift(void)
+{
+    if (__mask.render_sprites)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            if (__fg_tile_x_latch[i] > 0)
+                --__fg_tile_x_latch[i];
+            else {
+                (__fg_tile_lsb_shifters[i]) <<= 1;
+                (__fg_tile_msb_shifters[i]) <<= 1;
+            }
+        }
+    }
+}
+
+u8 fg_pixel()
+{
     u8 fg_pixel = 0x00;
     u8 fg_palette = 0x00;
     u8 fg_priority = 0x00;
-    for (k = 0; k < 8; k++) {
-        if (fg_tile_x_latch[k]) {
-            --fg_tile_x_latch[k];
+
+    u8 i = 0;
+    for (; i < 8; ++i) {
+        if (__fg_tile_x_latch[i]) {
             continue;
-        } else {
-            u8 lo = fg_tile_lsb[k] & 0x80; fg_tile_lsb[k] <<= 1;
-            u8 hi = fg_tile_msb[k] & 0x80; fg_tile_msb[k] <<= 1;
-            if (fg_pixel == 0x00) {
-                fg_pixel  = (hi > 0) << 1 | (lo > 0);
-                fg_palette = fg_tile_attr_latch[k] & 0x03;
-                fg_priority = ((fg_tile_attr_latch[k] & 0x20) >> 5);
-            }
+        }
+
+        fg_pixel = ((__fg_tile_msb_shifters[i] & 0x80) >> 7 << 1) | ((__fg_tile_lsb_shifters[i] & 0x80) >> 7);
+        fg_palette = __fg_tile_attr_latch[i] & 0x03;
+        fg_priority = (__fg_tile_attr_latch[i] & 20) >> 5;
+        if (fg_pixel != 0x00) {
+            break;
         }
     }
-
-    if (oam[0].y == __oam[0].y && (fg_pixel & 0x03) > 0) {
-        __status.sprite_hit_zero = 1;
-    }
-    return ((k & 0x07) << 5) | ((fg_priority & 1) << 4) | (fg_palette & 0x03) << 2 | (fg_pixel & 0x03);
+	return ((i & 0x07) << 5) | ((fg_priority & 1) << 4) | (fg_palette & 0x03) << 2 | (fg_pixel & 0x03);
 }
 
 #pragma endregion
 
 void ppu_clock()
 {
-    // test
     static int scanline = 0;
     static int cycle = 0;
+    static bool sprite_zero_over_scanline = false;
+
+    if ((scanline == 261) || scanline >= 0 && scanline <= 239) 
+    {
+        if (cycle >= 1 && cycle <= 256 || cycle >= 321 && cycle <= 336)
+        {
+            bg_shift();
+            bg_fetch(cycle);
+            if ((cycle & 7) == 0)
+                nt_move_x();
+            if (cycle == 256)
+                nt_move_y();
+        }
+
+        if (cycle == 257) // reset x
+            nt_copy_x();
+        if (scanline == 261 && cycle >= 280 && cycle < 305)
+            nt_copy_y();
+
+        if (scanline <= 239 && cycle >= 65 && cycle <= 256)
+        {
+            sprite_evaluation_step(scanline, cycle);
+            if (cycle == 256)
+                sprite_zero_over_scanline = __2nd_oam[0].y == __oam[0].y;
+        }
+
+        if (cycle >= 257 & cycle <= 329)
+        {
+            fg_fetch(scanline, cycle);
+        }
+
+        if (scanline == 261 && cycle == 1)
+		{
+			__status.vertical_blank = 0;
+			__status.sprite_overflow = 0;
+			__status.sprite_hit_zero = 0;
+		}
+        goto RENDER;
+    }
 
     if (scanline == 241 && cycle == 1) {
         __status.vertical_blank = 1;
         if (__control.enable_nmi)
             __nmi = true;
+		goto RENDER;
+    }
+
+    // idle scanline
+    if (scanline == 240)
+        goto RENDER;
+
+RENDER:
+    if (cycle < 256 && scanline < 240) 
+    {
+        u8 bg_pixel_data = 0x00;
+        u8 fg_pixel_data = 0x00;
+
+        if (__mask.render_background && (__mask.render_background_left || (cycle >= 9))) {
+            bg_pixel_data = bg_pixel();
+        }
+
+        if (__mask.render_sprites && (__mask.render_sprites_left || (cycle >= 9))) {
+            fg_pixel_data = fg_pixel();
+        }
+
+        if ((fg_pixel_data & 0x03) == 0 || ((fg_pixel_data & 0x10) > 0 && ((bg_pixel_data & 0x03) != 0)))
+            draw_one_pixel(cycle, scanline, ppu_internal_read(0x3F00 | (bg_pixel_data & 0x0F)));
+        else 
+            draw_one_pixel(cycle, scanline, ppu_internal_read(0x3F10 | (fg_pixel_data & 0x0F)));
+
+        if (sprite_zero_over_scanline && (fg_pixel_data & 0x03 > 0) && (fg_pixel_data & 0xE0) == 0) {
+            __status.sprite_hit_zero = 1;
+        }
+        fg_shift();
     }
 
     cycle++;
@@ -501,28 +749,10 @@ void ppu_clock()
         if (scanline == 262) {
             scanline = 0;
         } else if (scanline == 261) {
-            goto LAST_CYCLE_OF_FRAME;
+            __frame_complete = true;
         }
     }
     return;
-LAST_CYCLE_OF_FRAME:
-    if (__mask.render_background) {
-        // for test, render a frame with name-table in one clock
-        for (int i = 0; i < 240; ++i) 
-        {
-            for (int j = 0; j < 256; ++j) 
-            {
-                u8 bg_pixel_data = bg_pixel(i, j);
-                u8 fg_pixel_data = fg_pixel(i, j);
-
-                if ((fg_pixel_data & 0x03) == 0 || ((fg_pixel_data & 0x10) > 0 && ((fg_pixel_data & 0x03) != 0)))
-                    draw_one_pixel(j, i, ppu_internal_read(0x3F00 | (bg_pixel_data & 0x0F)));
-                else
-                    draw_one_pixel(j, i, ppu_internal_read(0x3F10 | (fg_pixel_data & 0x0F)));
-            }
-        }
-        __frame_complete = true;
-    }
 }
 
 bool ppu_nmi_triggered()
