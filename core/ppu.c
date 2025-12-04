@@ -652,7 +652,7 @@ u8 fg_pixel()
 
         fg_pixel = ((__fg_tile_msb_shifters[i] & 0x80) >> 7 << 1) | ((__fg_tile_lsb_shifters[i] & 0x80) >> 7);
         fg_palette = __fg_tile_attr_latch[i] & 0x03;
-        fg_priority = (__fg_tile_attr_latch[i] & 20) >> 5;
+        fg_priority = (__fg_tile_attr_latch[i] & 0x20) >> 5;
         if (fg_pixel != 0x00) {
             break;
         }

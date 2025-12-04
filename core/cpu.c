@@ -264,8 +264,8 @@ struct operation __operations[] = {
 A(IMP) { }
 A(IMM) { __helper_addr = __pc++; }
 A(ZP0) { __helper_addr = bus_read(__pc++); }
-A(ZPX) { __helper_addr = bus_read(__pc++) + __x; }
-A(ZPY) { __helper_addr = bus_read(__pc++) + __y; }
+A(ZPX) { __helper_addr = (bus_read(__pc++) + __x) & 0x00FF; }
+A(ZPY) { __helper_addr = (bus_read(__pc++) + __y) & 0x00FF; }
 A(REL) {
     __helper_addr = bus_read(__pc++);
     if (__helper_addr & 0x80) {
@@ -369,8 +369,13 @@ I(TYA) {
 #pragma region "Arithmetic"
 I(ADC) {
     u8 operand = fetch_operand();
-    u8 temp = __a + operand + GetFlag(c);
-    SetFlag(c, temp < __a || temp < operand);
+    // u8 temp = __a + operand + GetFlag(c);
+    // SetFlag(c, temp < __a || temp < operand);
+
+    // tell me why
+    u16 temp = __a + operand + GetFlag(c);
+    SetFlag(c, temp > 0x00FF);
+    
     SetFlag(z, temp == 0x00);
     SetFlag(v, 0x80 & (temp ^ __a) & (temp ^ operand));
     SetFlag(n, temp & 0x80);
@@ -379,8 +384,14 @@ I(ADC) {
 I(SBC) {
     u8 operand = fetch_operand();
     operand = ~operand;
-    u8 temp = __a + operand + GetFlag(c);
-    SetFlag(c, temp < __a || temp < operand);
+
+    // u8 temp = __a + operand + GetFlag(c);
+    // SetFlag(c, temp < __a || temp < operand);
+
+    // tell me why
+    u16 temp = __a + operand + GetFlag(c);
+    SetFlag(c, temp > 0x00FF);
+
     SetFlag(z, temp == 0x00);
     SetFlag(v, 0x80 & (temp ^ __a) & (temp ^ operand));
     SetFlag(n, temp & 0x80);

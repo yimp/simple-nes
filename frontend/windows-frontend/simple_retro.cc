@@ -6,10 +6,8 @@
 SimpleRetro* SimpleRetro::_instance;
 
 // *.exe <rom.nes> 
-SimpleRetro::SimpleRetro(GLFWwindow* window, int argc, char** argv)
+SimpleRetro::SimpleRetro(int argc, char** argv)
 {
-    _window = window;
-
     if (_instance) {
         std::abort();
     }
@@ -64,8 +62,29 @@ void SimpleRetro::setVideoRefresh(simple_retro_video_refresh_t cb)
     retro_set_video_refresh(video_refresh);
 }
 
+void SimpleRetro::setInputPoll(simple_retro_input_poll_t cb)
+{
+    _input_poll = cb;
+    retro_set_input_poll(input_poll);
+}
+
+void SimpleRetro::setInputState(simple_retro_input_state_t cb)
+{
+    _input_state = cb;
+    retro_set_input_state(input_state);
+}
 
 void SimpleRetro::video_refresh(const void *data, unsigned width, unsigned height, size_t pitch)
 {
-    _instance->_video_refresh(_instance->_window, data, width, height, pitch);
+    _instance->_video_refresh(_instance->_video_deivce, data, width, height, pitch);
+}
+
+void SimpleRetro::input_poll(void)
+{
+    _instance->_input_poll(_instance->_input_deivce);
+}
+
+int16_t SimpleRetro::input_state(unsigned port, unsigned device, unsigned index, unsigned id)
+{
+    return _instance->_input_state(_instance->_input_deivce, port, device, index, id);
 }

@@ -31,9 +31,10 @@ void update_texture(const void *data, unsigned width, unsigned height, size_t pi
     glEnable(GL_TEXTURE_2D);
 }
 
-void render(GLFWwindow* glfw, const void *data, unsigned width, unsigned height, size_t pitch)
+void render(void* device, const void *data, unsigned width, unsigned height, size_t pitch)
 {
     int w, h;
+    GLFWwindow* glfw = (GLFWwindow*)(device);
     glfwGetFramebufferSize(glfw, &w, &h);
 
     const float nes_aspect = 256.0f / 240.0f;
@@ -61,6 +62,30 @@ void render(GLFWwindow* glfw, const void *data, unsigned width, unsigned height,
     glEnd();
 }
 
+void    input_poll(void* device) { }
+int16_t input_state(void* pdevice, unsigned port, unsigned device, unsigned index, unsigned id)
+{
+    if (port != 0 || device != 1 || id >= 12)
+        return 0;
+    GLFWwindow* window = (GLFWwindow*)pdevice;
+    switch (id)
+    {
+    case RETRO_DEVICE_ID_JOYPAD_A:      return glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS;
+    case RETRO_DEVICE_ID_JOYPAD_B:      return glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS;
+    case RETRO_DEVICE_ID_JOYPAD_SELECT: return glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
+    case RETRO_DEVICE_ID_JOYPAD_START:  return glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
+    case RETRO_DEVICE_ID_JOYPAD_L:      return glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS;
+    case RETRO_DEVICE_ID_JOYPAD_R:      return glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS;
+    case RETRO_DEVICE_ID_JOYPAD_UP:     return glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS;
+    case RETRO_DEVICE_ID_JOYPAD_DOWN:   return glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS;
+    case RETRO_DEVICE_ID_JOYPAD_LEFT:   return glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS;
+    case RETRO_DEVICE_ID_JOYPAD_RIGHT:  return glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS;
+    default:
+        break;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     LOG_TRACE("Open game rom:%s", "mario.nes", "", 1234);
@@ -76,8 +101,12 @@ int main(int argc, char** argv)
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
-    SimpleRetro retro(window, argc, argv);
+    SimpleRetro retro(argc, argv);
+    retro.setVideoDeivce(window);
     retro.setVideoRefresh(render);
+    retro.setInputDeivce(window);
+    retro.setInputPoll(input_poll);
+    retro.setInputState(input_state);
     retro.reset();
     int w, h;
     while (!glfwWindowShouldClose(window))
