@@ -10,6 +10,7 @@ class Timestamp
 public:
     Timestamp() = default;
     Timestamp(int64_t us) : _us_since_epoch(us) { }
+    int64_t us() { return _us_since_epoch; }
 public:
     static Timestamp now();
     std::string YYYY_MM_DD_HH_MM_SS_UUUUUU() const;

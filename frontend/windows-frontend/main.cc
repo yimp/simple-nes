@@ -1,5 +1,6 @@
 #include "logging.h"
 #include "simple_retro.h"
+#include "audio_sync.h"
 #include <GLFW/glfw3.h>
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -35,6 +36,12 @@ void render(void* device, const void *data, unsigned width, unsigned height, siz
 {
     int w, h;
     GLFWwindow* glfw = (GLFWwindow*)(device);
+
+    if (!glfwGetCurrentContext()) {
+        glfwMakeContextCurrent(glfw);
+        glfwSwapInterval(1);
+    }
+
     glfwGetFramebufferSize(glfw, &w, &h);
 
     const float nes_aspect = 256.0f / 240.0f;
@@ -60,6 +67,7 @@ void render(void* device, const void *data, unsigned width, unsigned height, siz
     glTexCoord2f(1.0f, 0.0f); glVertex2f( w_scale,  h_scale);
     glTexCoord2f(0.0f, 0.0f); glVertex2f(-w_scale,  h_scale);
     glEnd();
+    glfwSwapBuffers(glfw);
 }
 
 void    input_poll(void* device) { }
@@ -88,42 +96,31 @@ int16_t input_state(void* pdevice, unsigned port, unsigned device, unsigned inde
 
 int main(int argc, char** argv)
 {
-    LOG_TRACE("Open game rom:%s", "mario.nes", "", 1234);
-    LOG_TRACE("rom size:%d", 123);
-    LOG_DEBUG("debug:%d", 123);
-    LOG_INFO("info:%d", 123);
-    LOG_WARN("warn:%d", 123);
-    LOG_ERROR("error:%d", 123);
-
     glfwInit();
     glfwSetErrorCallback(error_callback);
     GLFWwindow* window = glfwCreateWindow(256, 240, "simple-nes", nullptr, nullptr);
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
 
     SimpleRetro retro(argc, argv);
-    retro.setVideoDeivce(window);
+    retro.setVideoDevice(window);
     retro.setVideoRefresh(render);
-    retro.setInputDeivce(window);
+    retro.setInputDevice(window);
     retro.setInputPoll(input_poll);
     retro.setInputState(input_state);
     retro.reset();
-    int w, h;
-    while (!glfwWindowShouldClose(window))
-    {
-        // render
-        glfwGetFramebufferSize(window, &w, &h);
-        retro.run();
-        glfwSwapBuffers(window);
 
-        // events
-        glfwPollEvents();
-
-        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
-            LOG_TRACE("A pressed");
-        }
+    auto audio = audio_sync::start(&retro);
+    if (!audio) {
+        goto EXIT;
     }
 
+    while (!glfwWindowShouldClose(window))
+    {
+        // events
+        glfwWaitEvents();
+    }
+
+EXIT:
+    audio_sync::destroy(audio);
     glfwDestroyWindow(window);
     glfwTerminate();
     return 0;

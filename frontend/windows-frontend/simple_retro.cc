@@ -74,17 +74,28 @@ void SimpleRetro::setInputState(simple_retro_input_state_t cb)
     retro_set_input_state(input_state);
 }
 
+void SimpleRetro::setAudioSampleBatch(simple_retro_audio_sample_batch_t cb)
+{
+    _audio_sample_batch = cb;
+    retro_set_audio_sample_batch(audio_sample_batch);
+}
+
 void SimpleRetro::video_refresh(const void *data, unsigned width, unsigned height, size_t pitch)
 {
-    _instance->_video_refresh(_instance->_video_deivce, data, width, height, pitch);
+    _instance->_video_refresh(_instance->_video_device, data, width, height, pitch);
 }
 
 void SimpleRetro::input_poll(void)
 {
-    _instance->_input_poll(_instance->_input_deivce);
+    _instance->_input_poll(_instance->_input_device);
 }
 
 int16_t SimpleRetro::input_state(unsigned port, unsigned device, unsigned index, unsigned id)
 {
-    return _instance->_input_state(_instance->_input_deivce, port, device, index, id);
+    return _instance->_input_state(_instance->_input_device, port, device, index, id);
+}
+
+size_t SimpleRetro::audio_sample_batch(const int16_t *data, size_t frames)
+{
+    return _instance->_audio_sample_batch(_instance->_audio_device, data, frames);
 }

@@ -8,6 +8,7 @@
 static retro_video_refresh_t __video_cb;
 static retro_input_poll_t __input_poll_cb;
 static retro_input_state_t __input_state_cb;
+static retro_audio_sample_batch_t __audio_sample_batch_cb;
 
 RETRO_API void retro_init(void)
 {
@@ -52,6 +53,11 @@ RETRO_API void retro_run(void)
     }
 
     __video_cb(buffer, 256, 240, 256 * 2);
+
+    {
+        static char test[735 * 2 * 2];
+        __audio_sample_batch_cb((const int16_t*)test, 735);
+    }
 }
 
 RETRO_API void retro_reset(void)
@@ -72,4 +78,9 @@ RETRO_API void retro_set_input_poll(retro_input_poll_t cb)
 RETRO_API void retro_set_input_state(retro_input_state_t cb)
 {
     __input_state_cb = cb;
+}
+
+RETRO_API void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb)
+{
+    __audio_sample_batch_cb = cb;
 }

@@ -1,4 +1,4 @@
-1.程序架构设计
+# 1.程序架构设计
 
 ## 1.1 RetroArch 架构
 
@@ -583,6 +583,122 @@ void retro_reset(void) {}
 ```
 
 > 💡 这段代码每帧都会输出一张灰色图像到前端，说明整个调用链已经成功建立。
+
+## 3.4 音频同步（Audio Synchronization）
+
+NES 的 APU 以固定节拍生成 PCM 音频数据，而现代 PC 的音频设备以自己的独立采样率定时请求数据。因此模拟器必须建立一种 **稳定、低延迟且无音裂的同步方式**，确保两端的数据流节奏一致。**音频同步还可以用于控制游戏的帧率**。
+
+------
+
+### 3.4.1 音频库的 I/O 模型（以 miniaudio 为例）
+
+现代跨平台音频库（如 **miniaudio、PortAudio、SDL Audio**）都基于类似的回调模型：
+
+```
+Audio Backend  <-- 定时请求 -->  User Callback Function
+```
+
+**回调式（Callback-based）I/O 模型**
+
+miniaudio 的典型工作方式：
+
+1. 音频子系统（例如 WASAPI、CoreAudio、ALSA）按设备采样率定时要求一批音频样本。
+2. miniaudio 调用用户注册的 callback，例如：
+
+```cpp
+void audio_callback(ma_device* device, void* output, const void* input, ma_uint32 frameCount);
+```
+
+1. 回调负责将 **frameCount 个样本** 填入 output 缓冲区。
+2. 音频设备将数据送入声卡播放。
+
+**特征**
+
+- **调用频率固定**：由声卡的采样率决定
+   例：48kHz、1024 frames buffer → 每 ~21ms 调一次回调。
+- **线程完全独立**：在独立音频线程中调用，不可阻塞过久。
+- **用户必须提供足够的数据**：否则产生音裂（underrun）。
+
+------
+
+### 3.4.2 音频同步
+
+libretro 的音频模型是 **push-based**：核心主动通过 `audio_sample` 或 `audio_sample_batch` 返回 PCM 数据。
+
+然而 miniaudio 的模型是 **pull-based**：音频线程定时向我们索取数据。
+
+因此必须建立以下数据流：
+
+```
+ Audio Hardware ---> miniaudio callback ---> retro_run ---> libretro core ---> Audio Hardware
+```
+
+**Step 0：初始化**
+
+- 创建一个 **缓冲区**。
+- 注册 libretro 的音频回调。
+- 启动 miniaudio 播放设备。
+
+------
+
+**Step 1：miniaudio callback 拉取数据**
+
+当声卡需要音频：
+
+```cpp
+void audio_callback(...) {
+    read N frames from audio_fifo into output;
+    if (fifo insufficient) → 请求模拟器跑一帧来补数据
+}
+```
+
+行为：
+
+- 从 FIFO 中读 `frameCount` 个样本。
+- 如果缓冲区不足：
+
+```
+run_frame();
+从 core 的 audio callback 获取批量样本 → 写入 FIFO
+继续读取
+```
+
+------
+
+**Step 2：调用 retro_run()**
+
+当 FIFO 不足时，调用：
+
+```cpp
+core->retro_run();
+```
+
+APU 在运行一帧后，libretro 会通过 `audio_sample_batch` 返回音频：
+
+```
+retro_run()
+   → APU tick (per CPU cycle)
+   → 输出若干 PCM 样本
+   → audio callback 被调用，把样本 push 进 FIFO
+```
+
+------
+
+**Step 3：写入 FIFO**
+
+音频回调如：
+
+```cpp
+size_t audio_callback_batch(const int16_t* data, size_t frames) {
+    fifo.write(data, frames);
+}
+```
+
+------
+
+**Step 4：继续 miniaudio 填充**
+
+如果 FIFO 足够，miniaudio 将顺利填满 output，声音无卡顿。
 
 # 4.CPU模拟
 

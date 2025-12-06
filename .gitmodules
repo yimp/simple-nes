@@ -1,3 +1,6 @@
 [submodule "third/glfw"]
 	path = third/glfw
 	url = https://github.com/glfw/glfw.git
+[submodule "third/miniaudio"]
+	path = third/miniaudio
+	url = https://github.com/mackron/miniaudio
