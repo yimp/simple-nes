@@ -4,6 +4,7 @@
 #include "ppu.h"
 #include "dma.h"
 #include "bus.h"
+#include "apu.h"
 
 static retro_video_refresh_t __video_cb;
 static retro_input_poll_t __input_poll_cb;
@@ -55,14 +56,15 @@ RETRO_API void retro_run(void)
     __video_cb(buffer, 256, 240, 256 * 2);
 
     {
-        static char test[735 * 2 * 2];
-        __audio_sample_batch_cb((const int16_t*)test, 735);
+        sample_vec vec = apu_end_frame();
+        __audio_sample_batch_cb(vec.data, vec.size);
     }
 }
 
 RETRO_API void retro_reset(void)
 {
     cpu_reset();
+    apu_reset();
 }
 
 RETRO_API void retro_set_video_refresh(retro_video_refresh_t cb)

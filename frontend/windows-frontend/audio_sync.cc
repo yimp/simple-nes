@@ -2,7 +2,7 @@
 #include "logging.h"
 #include <miniaudio.h>
 
-#define SAMPLE_RATE (44100*2)
+#define SAMPLE_RATE (44100)
 #define CHANELS 2
 #define SAMPLES_PER_FRAME 735
 

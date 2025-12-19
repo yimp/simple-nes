@@ -2,6 +2,7 @@
 #include "cart.h"
 #include "ppu.h"
 #include "dma.h"
+#include "apu.h"
 
 enum adress_space
 {
@@ -110,8 +111,8 @@ void bus_write(uint16_t addr, uint8_t data)
         // NOTE: $4017 writes are NOT related to controller.
         return;
     }
-    case APUIO: return;
-    case CARTIO: cart_write(addr, data);
+    case APUIO: apu_bus_write(addr, data); break;
+    case CARTIO: cart_write(addr, data); break;
     default: break;
     }
     return;
