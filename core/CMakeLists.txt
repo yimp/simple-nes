@@ -8,4 +8,4 @@ set(SRC
     "./apu.c"
 )
 
-add_library(simple_nes_core STATIC ${SRC})
+add_library(simple_nes_core SHARED ${SRC})
