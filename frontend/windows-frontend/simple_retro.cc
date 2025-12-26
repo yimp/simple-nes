@@ -104,7 +104,23 @@ SimpleRetro::SimpleRetro(int argc, char** argv)
 
     // libretro function loader
     {
-        std::string core_path = "libsimple_nes_core.dll";
+#ifdef _MSC_VER
+        const std::string lib_prefix = "";
+#else
+        const std::string lib_prefix = "lib";
+#endif
+
+#ifdef _WIN32
+        const std::string lib_suffix = ".dll";
+#elif defined(__linux__)
+        const std::string lib_suffix = ".so";
+#elif defined(__APPLE__)
+        const std::string lib_suffix = ".dylib";
+#elif defined(__unix__) || defined(__unix) // other UNIX like OS (eg. BSD)
+        const std::string lib_suffix = ".so";
+#endif
+
+        const std::string core_path = lib_prefix + "simple_nes_core" + lib_suffix;
 #ifdef _WIN32
         dll_handle_ = LoadLibraryA(core_path.c_str());
         if (!dll_handle_) {
