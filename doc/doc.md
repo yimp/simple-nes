@@ -3913,3 +3913,472 @@ $$
 output=\frac{95.88}{\frac{8128}{p1+p2}+100}
 $$
 其中`p1`和`p2`是两个方波通道的输出音量，范围均为0~15.
+
+## 8.2 三角波（triangle）
+
+### 8.2.1 概览
+
+NES APU 一共有 5 个声音源，其中 Triangle 通道（$4008–$400B）具有非常鲜明的特点：**1）没有 Envelope（包络）；2）没有 Volume 控制；3）没有 Sweep。**因此 Triangle 并不适合做旋律主音，而更常用于：
+
+- Bass（低音）
+- 持续音（Drone）
+- 简单打击感节奏
+
+从程序员视角看，Triangle 通道是：**“结构简单，但控制逻辑很独特”的一个通道**。
+
+**Triangle 通道寄存器总览（$4008–$400B）**
+
+| 地址  | 寄存器              | 主要功能                  |
+| ----- | ------------------- | ------------------------- |
+| $4008 | Linear Counter 控制 | Linear Counter 配置       |
+| $4009 | （未使用）          | ——                        |
+| $400A | Timer Low           | 频率低 8 位               |
+| $400B | Timer High + Length | 频率高 3 位 + Length Load |
+
+**$4008 —— Linear Counter 控制寄存器**
+
+```
+7   6   5   4   3   2   1   0
+C   R   R   R   R   R   R   R
+```
+
+| 位   | 名称         | 作用                      |
+| ---- | ------------ | ------------------------- |
+| 7    | Control Flag | 控制 Linear / Length 行为 |
+| 6–0  | Reload Value | Linear Counter 初始值     |
+
+Control Flag 的双重含义
+
+- 当 `Control = 1`：
+  - Linear Counter **不会自动清零**
+  - Length Counter 被 halt
+- 当 `Control = 0`：
+  - Linear Counter 会在 reload 后递减
+  - Length Counter 正常递减
+
+**$400A —— Timer Low**
+
+```
+7   6   5   4   3   2   1   0
+T   T   T   T   T   T   T   T
+```
+
+- Timer 的低 8 位
+- 控制 Triangle 的音高
+
+**$400B —— Timer High & Length Counter Load**
+
+```
+7   6   5   4   3   2   1   0
+L   L   L   L   L   T   T   T
+```
+
+| 位   | 名称         | 作用            |
+| ---- | ------------ | --------------- |
+| 7–3  | Length Index | 查 Length Table |
+| 2–0  | Timer High   | Timer 高 3 位   |
+
+写入该寄存器时会发生三个关键行为：
+
+1. 重载 Length Counter
+2. 重载 Linear Counter（设置 reload flag）
+3. 重载 Timer
+
+这是 Triangle 通道“音符起始”的关键触发点。
+
+### 8.2.2 Triangle 的波形序列器（Waveform Sequencer）
+
+**32-step 三角波序列**
+
+Triangle 的输出不是数学意义上的三角函数，而是一个 **32 步的离散序列**：
+
+- 上行 16 步
+- 下行 16 步
+
+输出幅度范围固定为：`0–15`
+
+**Sequencer 的推进条件**
+
+Triangle 的序列器只有在以下条件 **同时满足** 时才会前进：
+
+- Length Counter > 0
+- Linear Counter > 0
+
+只要其中任意一个为 0：
+
+> **Triangle 波形“冻结”在当前 step**
+
+⚠️ 注意：
+
+- 冻结 ≠ 静音
+- 实际效果通常表现为：输出固定电平
+
+### 8.2.3 Timer（频率控制）
+
+Triangle 使用与 Pulse 类似的 Timer 机制，但是triangle 使用 **32 分频**（因为 32-step 波形）,每过（timer+1）个CPU时钟，波形前进一步，引起波频和CPU工作频率的关系式如下：
+
+$$
+f_{wave} = \frac{f_{cpu}}{32*(timer + 1)}
+$$
+一个step的周期应该为：
+$$
+P_{step}=\frac{1}{32f_{wave}}=\frac{timer+1}{f_{cpu}}={P_{cpu}}(timer+1)
+$$
+如果令CPU频率和音频采样率的比值为`k`，最终可以得到和方波一样的结论：
+$$
+\frac{P_{step}}{P_{sample}}=\frac{(timer+1)}{k}
+$$
+这个公式揭示了：**每采样`(timer+1)/k`个样本，三角就前进了`1/32`的step。**根据这个公式，方波发生器就可以用一个简单的计数器来实现：每次采样，这个计数器增加`k`，当计数器大于`timer+1`，则三角波前进一个`1/32step，然后重置计数器。
+
+### 8.2.4 Length Counter（长度计数器）
+
+**1.Length Counter**
+
+Triangle 也拥有标准的 NES Length Counter：控制“这个音符可以持续多久”。它使用与 Pulse / Noise 相同的 Length Table，Triangle 的 Length Counter **不能被 Envelope loop**，它的 halt 行为来自另一个寄存器位（见 Linear Counter）。当 Length Counter 归零：
+
+- Sequencer 停止推进
+- Triangle 输出被冻结
+
+**2.Linear Counter（线性计数器，Triangle 核心）**
+
+Linear Counter 是 Triangle 通道 **最重要、也是最容易混淆的组件**。它的作用可以概括为：**第二个“发声许可”计数器**，只有当：
+
+```
+Length Counter > 0
+AND
+Linear Counter > 0
+```
+
+Triangle 才会正常振荡。为什么 Triangle 需要 Linear Counter？这是一个典型的硬件设计取舍：
+
+- Triangle 没有 Envelope
+- 但需要某种方式控制音符的“衰减 / 门控”
+
+Linear Counter 本质上承担了：
+
+- 简单的音量包络替代
+- 更平滑的音符起止控制
+
+## 8.3 噪波（noise）
+
+### 8.3.1 概览
+
+Noise 通道（$400C–$400F）是 NES 中**唯一的非周期性波形通道**，其核心用途是：
+
+- 鼓点（Snare / Hi-hat）
+- 爆炸、风声、噪声效果
+- 某些节奏型打击音
+
+从本质上讲：**Noise = 伪随机比特流 × 包络控制。**
+
+**Noise 通道寄存器总览（$400C–$400F）**
+
+| 地址  | 寄存器              | 主要功能                  |
+| ----- | ------------------- | ------------------------- |
+| $400C | Envelope 控制       | 包络 / 音量 / Length halt |
+| $400D | （未使用）          | ——                        |
+| $400E | Noise 控制          | LFSR 模式 + Period index  |
+| $400F | Length Counter Load | Length 触发               |
+
+**$400C —— Envelope 控制寄存器**
+
+```
+7   6   5   4   3   2   1   0
+L   C   V   V   V   V   V   V
+```
+
+| 位   | 名称               | 作用                             |
+| ---- | ------------------ | -------------------------------- |
+| 7    | Loop / Length halt | 控制 Envelope loop & Length halt |
+| 6    | Constant Volume    | 固定音量 or Envelope             |
+| 5–0  | Volume / Period    | 音量值或 Envelope period         |
+
+行为与 Pulse 通道完全一致。
+
+**$400E —— Noise 控制寄存器**
+
+```
+7   6   5   4   3   2   1   0
+M   -   -   -   P   P   P   P
+```
+
+| 位   | 名称         | 作用                  |
+| ---- | ------------ | --------------------- |
+| 7    | Mode         | LFSR 反馈模式选择     |
+| 3–0  | Period Index | 查 Noise period table |
+
+- `Mode = 0` → 长模式（白噪声）
+- `Mode = 1` → 短模式（周期噪声）
+
+**$400F —— Length Counter Load**
+
+```
+7   6   5   4   3   2   1   0
+L   L   L   L   L   -   -   -
+```
+
+写入该寄存器时：
+
+1. 从 Length Table 装载 Length Counter
+2. 重置 Envelope（start flag）
+
+这是 Noise 声音“起始”的主要触发点。
+
+### 8.3.2 LFSR（线性反馈移位寄存器）
+
+**为什么用 LFSR？**
+
+硬件上生成“真随机”代价高昂，因此 NES 使用 **LFSR 伪随机序列** 来模拟噪声。Noise 通道内部维护一个 **15-bit 移位寄存器**。每当 Timer 触发一次 clock：
+
+1. 根据 mode 选择 tap 位
+2. 计算 XOR 反馈位
+3. 整体右移
+4. 反馈位写入 bit14
+
+**两种 Noise 模式（长 / 短）**
+
+LFSR 有两种反馈路径，由寄存器控制：
+
+| 模式   | Tap 位      | 周期  | 听感            |
+| ------ | ----------- | ----- | --------------- |
+| 长模式 | bit0 ⊕ bit1 | 32767 | 白噪声          |
+| 短模式 | bit0 ⊕ bit6 | 93    | 金属感 / 音调感 |
+
+短模式并不“更随机”，而是：**刻意制造可感知的周期性噪声**。这在 NES 打击乐中非常常见。
+
+### 8.3.3 Timer（噪声速率控制）
+
+Noise 的 Timer 并不直接表示频率，而是：**LFSR 更新速率控制器**。Timer 使用一个 **固定查表的周期值**：
+
+- 不同于 Pulse / Triangle 的 11-bit Timer
+- Noise 使用一个 **4-bit period index → 查 Noise Period Table**
+
+Timer 每次归零时：
+
+- Clock 一次 LFSR
+- 决定是否输出 0 或 envelope volume
+
+## 8.4 DMC
+
+### 8.4.1 概览
+
+可以把 DMC 看成一个：**“以固定比特率，从内存读取 1-bit 音频数据，并驱动一个 6-bit DAC 的硬件状态机”**。它不是 PCM 播放器，也不是波形发生器，而是一个**1-bit delta 解码器**。
+
+**`$4010` — 控制寄存器**
+
+| 位   | 含义             |
+| ---- | ---------------- |
+| 7    | IRQ Enable       |
+| 6    | Loop             |
+| 3–0  | Timer rate index |
+
+**`$4011` — 直接输出值**
+
+- 直接设置 Output Unit 的初始值（0–63）
+- 不影响 Sample Counter
+
+**`$4012` — Sample 地址**
+
+- 实际地址 = `$C000 + (value << 6)`
+
+**`$4013` — Sample 长度**
+
+- 实际长度 = `(value << 4) + 1` 字节
+
+**`$4015` — 通道使能**
+
+- Bit 4 控制 DMC 启停
+- 写 0：立即停止 DMC
+- 写 1：若 Sample Counter 为 0，则重新装载
+
+### 8.4.2 Timer（比特时钟）
+
+DMC的Timer决定 DMC 的“播放速度”，它控制的并非是传统意义的音高，而是控制 **每秒处理多少个 bit**。
+
+- Timer 每次触发：
+  - Shift Register 移出 1 bit
+  - Output Unit 可能发生 +2 / −2
+- Timer 的周期由 `$4010` 的 rate index 决定
+
+> 注意：DMC 的 Timer **不参与 frame counter**，是完全独立运行的。
+
+### 8.4.3 内部组件
+
+**Memory Reader（内存读取单元）**
+
+APU的内存读取单元可以从 CPU 地址空间 `$8000–$FFFF` 读取采样数据。**只有在 Sample Buffer 为空时才会触发读取**，每次读取 1 字节然后写入 Sample Buffer。每次读取地址自动递增（$FFFF 后回绕到 $8000）。Memory Reader每次内存读取会导致 CPU 暂停 **4 个 CPU cycle**。这是 NES 上极少数的硬件级 stall 行为。
+
+**Sample Buffer（8-bit）**
+
+DMC通道中有一个Sample Buffer是用于暂存从内存读取的 1 字节数据，当为Shift Register 空时，就会把 Sample Buffer 装载进去。Sample Buffer 与 Shift Register **解耦**，不要求同步。
+
+**Shift Register（1-bit 串行寄存器）**
+
+Shift Register中的8-bit 数据按 **LSB → MSB** 顺序逐位输出，每个 Timer tick输出一位，8位数据全部输出后，尝试从 Sample Buffer 重新装载。
+
+**Output Unit（7-bit 输出累加器）**
+
+Output Unit中保存了当前 DMC 的输出电平（0–127）。若当前 bit = 1：输出值 +2，若当前 bit = 0：输出值 −2，最终的输出值限制在 `[0, 127]`，超出范围将被钳制
+
+> DMC 的“声音”本质上是这个累加器的时间变化轨迹。
+
+**Sample Counter（样本计数器）**
+
+记录当前采样还剩多少字节未播放。每成功读取 1 字节：计数 −1，计数归零时：
+
+- Loop = 1 → 重新加载
+- Loop = 0 → 停止播放，并可能触发 IRQ
+
+## 8.5 非线性混音（Non-linear Mix）
+
+### 8.5.1 为什么 NES APU是“非线性混音”
+
+所谓**线性混音**，就是像下面这样把各个通道的输出信号直接加起来。但 NES APU **绝对不是这样工作的**。
+
+```
+output = pulse1 + pulse2 + triangle + noise + dmc
+```
+
+原因只有一个：**NES APU 的混音发生在模拟电路中，而不是数字域。**不同通道通过不同的电阻网络注入到同一个模拟输出节点， 最终的电压并不与“数值和”成正比。因此：
+
+- 线性相加 → 声音刺耳、不平衡
+- 非线性混音 → 接近真实 NES
+
+从硬件角度看，APU Mixer 可以分为两组输入：
+
+**1.Pulse Mixer**
+
+- Pulse 1
+- Pulse 2
+
+这两个通道 **共享同一个混音公式**。
+
+**2.TND Mixer**
+
+- Triangle
+- Noise
+- DMC
+
+这三个通道通过 **另一套独立的混音网络** 注入输出。
+
+最终输出为：**Final Output = Pulse Mixer + TND Mixer**
+
+### 8.5.2 Pulse 通道的非线性混音公式
+
+Pulse 通道在硬件上通过一组电阻连接到输出端， 等效为一个非线性分压网络。两个Pulse通道的混音使用以下经验公式：
+$$
+output=\frac{95.88}{\frac{8128}{p1+p2}+100}
+$$
+**特点**
+
+- 当 pulse1 + pulse2 = 0 → 输出为 0
+- 音量越大，增益逐渐变小（自然压缩）
+- 防止方波叠加时削波过载
+
+### 8.5.3 TND（三通道）非线性混音公式
+
+**计算公式**
+$$
+tnd=\frac{159.79}{\frac{1}{\frac{triangle}{8227}+\frac{noise}{12241}+\frac{dmc}{22638}}+100}
+$$
+
+
+```
+TNDOut = 159.79 / (1 / (triangle / 8227 + noise / 12241 + dmc / 22638) + 100)
+```
+
+**每个通道的权重来源**
+
+| 通道     | 分母常数 | 含义         |
+| -------- | -------- | ------------ |
+| Triangle | 8227     | 电阻网络权重 |
+| Noise    | 12241    | 电阻网络权重 |
+| DMC      | 22638    | DAC 注入权重 |
+
+这些常数来自对真实 NES 主板的测量。
+
+# 9.Mapper
+
+## 9.1 概览
+
+### 9.1.1 什么是 Mapper（为什么 NES 需要 Mapper）
+
+在最早的 NES 设计中，CPU 和 PPU 的可寻址空间是固定的：
+
+- $0000–$1FFF：2KB 内部 RAM（镜像）
+- $2000–$3FFF：PPU 寄存器（镜像）
+- $4000–$401F：APU / I/O
+- $4020–$FFFF：卡带空间
+
+其中：
+
+- $8000–$FFFF：**CPU 可见的 PRG ROM 区域（32KB）**
+
+但实际游戏往往需要：
+
+- 远大于 32KB 的程序
+- 多组图像数据（CHR）
+- 不同屏幕滚动方式
+
+ Mapper 的本质目的：**在有限的 CPU / PPU 地址空间内，通过“动态映射”，访问更大的 ROM / RAM。**
+
+------
+
+### 9.3.2 Mapper 在硬件上的真实含义
+
+从硬件角度，Mapper 通常是一颗或多颗逻辑芯片，负责：
+
+- 监听 CPU / PPU 地址线
+- 监听 CPU 写入数据
+- 根据内部寄存器状态：
+  - 选择当前“可见”的 PRG Bank
+  - 选择当前“可见”的 CHR Bank
+  - 控制镜像方式（Mirroring）
+  - 可能触发 IRQ
+
+因此：**Mapper ≠ 纯软件概念，而是卡带上的地址译码逻辑。**模拟器中的 Mapper，就是在模拟这些“地址重定向规则”。
+
+### 9.3.3 Mapper 的三大核心职责
+
+几乎所有 Mapper 都围绕这三件事展开：
+
+**1.PRG Bank 切换（CPU 侧）**
+
+- 决定 CPU 访问 $8000–$FFFF 时，实际访问哪一段 PRG ROM / RAM
+- 常见粒度：
+  - 32KB
+  - 16KB
+  - 8KB
+
+**2.CHR Bank 切换（PPU 侧）**
+
+- 决定 PPU 访问 $0000–$1FFF 时，使用哪一段 CHR ROM / RAM
+- 常见粒度：
+  - 8KB
+  - 4KB
+  - 2KB
+  - 1KB
+
+**3.name-table镜像控制（Mirroring）**
+
+- 决定 PPU 的 4 个 Name Table 如何映射到 2KB VRAM
+- 常见模式：Horizontal、Vertical、Single-screen和Four-screen。
+
+## 9.3 Mapper000 -- NROM
+
+
+
+## 9.4 Mapper002 -- UxROM
+
+
+
+## 9.5 Mapper004 -- MMC3
+
+
+
+## 9.6 其他Mapper
+
+更多其他的Mapper细节参见NesWiki的Mapper矩阵：
+
+> https://www.nesdev.org/wiki/Mapper#iNES_1.0_mapper_grid
+
