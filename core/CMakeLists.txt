@@ -13,4 +13,4 @@ set(SRC
     "./mappers/246.c"
 )
 
-add_library(simple_nes_core STATIC ${SRC})
+add_library(simple_nes_core SHARED ${SRC})
