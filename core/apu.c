@@ -638,7 +638,7 @@ sample_vec apu_end_frame()
         s0 = s0 > 0 ? s0 : 0;
         s1 = s1 > 0 ? s1 : 0;
         n = n > 0 ? n : 0;
-        // s0 = s1 = d = t = 0;
+        // s0 = s1 = n = t = 0;
         buffer[i << 1] = (i16)(__pulse_table[s0 + s1]) + __tnd_table[t][n][d];
         buffer[(i << 1) | 1] = buffer[i << 1];
     }

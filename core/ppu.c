@@ -668,6 +668,14 @@ void ppu_clock()
     static int cycle = 0;
     static bool sprite_zero_over_scanline = false;
 
+    if(__mask.render_background || __mask.render_sprites)
+	{
+		if (cycle == 260 && scanline < 240)
+		{
+			cart_scanline_handler();
+		}
+	}
+
     if ((scanline == 261) || scanline >= 0 && scanline <= 239) 
     {
         if (cycle >= 1 && cycle <= 256 || cycle >= 321 && cycle <= 336)

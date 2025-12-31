@@ -5,6 +5,7 @@
 bool cpu_clock();
 void cpu_reset();
 void cpu_nmi();
+void cpu_irq();
 
 
 // test

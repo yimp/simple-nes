@@ -11,6 +11,8 @@ enum
 
 // basics
 void cart_load(const u8* data);
+bool cart_irq();
+void cart_scanline_handler();
 
 // cpu bus io
 u8   cart_read(u16 addr);

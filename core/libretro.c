@@ -46,18 +46,26 @@ RETRO_API void retro_run(void)
         } else {
             cpu_clock();
         }
-        ppu_clock();
-        ppu_clock();
-        if (ppu_nmi_triggered()) {
-            cpu_nmi();
+
+        for (int i = 0; i < 3; ++i) 
+        {
+            ppu_clock();
+            if (ppu_nmi_triggered()) 
+            {
+                cpu_nmi();
+            }
+
+            if (cart_irq())
+            {
+                cpu_irq();
+            }
         }
     }
 
     __video_cb(buffer, 256, 240, 256 * 2);
-
     {
-        sample_vec vec = apu_end_frame();
-        __audio_sample_batch_cb(vec.data, vec.size);
+        sample_vec data = apu_end_frame();
+        __audio_sample_batch_cb(data.data, data.size);
     }
 }
 

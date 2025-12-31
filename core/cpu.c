@@ -375,6 +375,7 @@ I(ADC) {
     // tell me why
     u16 temp = __a + operand + GetFlag(c);
     SetFlag(c, temp > 0x00FF);
+    temp &= 0xFF;
     
     SetFlag(z, temp == 0x00);
     SetFlag(v, 0x80 & (temp ^ __a) & (temp ^ operand));
@@ -391,6 +392,7 @@ I(SBC) {
     // tell me why
     u16 temp = __a + operand + GetFlag(c);
     SetFlag(c, temp > 0x00FF);
+    temp &= 0xFF;
 
     SetFlag(z, temp == 0x00);
     SetFlag(v, 0x80 & (temp ^ __a) & (temp ^ operand));
@@ -605,6 +607,9 @@ I(CLV) { SetFlag(v, 0); }
 
 #pragma region "basics"
 static bool __nmi_pending = false;
+static bool __irq_pending = false;
+
+static int counter = 0;
 
 bool cpu_clock() 
 {
@@ -627,6 +632,26 @@ bool cpu_clock()
         remain_cycles += 8;
         __nmi_pending = false;
     }
+    else if (__irq_pending) // If interrupts are allowed
+	{
+		// Push the program counter to the stack. It's 16-bits dont
+		// forget so that takes two pushes
+        stack_push((__pc >> 8) & 0x00FF);
+        stack_push((__pc) & 0x00FF);
+
+		// Then Push the status register to the stack
+		SetFlag(b, 0);
+		SetFlag(u, 1);
+		SetFlag(i, 1);
+        stack_push(__p.reg);
+
+		// Read new program counter location from fixed address
+		uint16_t lo = bus_read(0xFFFE + 0);
+		uint16_t hi = bus_read(0xFFFE + 1);
+		__pc = (hi << 8) | lo;
+		remain_cycles += 7;
+        __irq_pending = false;
+	}
     {
         u8 opcode = bus_read(__pc++);
         remain_cycles = __operations[opcode].cycles;
@@ -650,6 +675,12 @@ void cpu_nmi()
 {
     __nmi_pending = true;
 }
+
+void cpu_irq()
+{
+    __irq_pending = true;
+}
+
 #pragma endregion
 
 u16 cpu_x_y() {
