@@ -117,7 +117,10 @@ enum instruction {
     CLC, SEC, CLI, SEI, CLD, SED, CLV,
 
     /* Others */
-    NOP, XXX
+    NOP, XXX,
+
+    /* Unofficial instructions */
+    ASO, RLA, LSE, RRA, AXS, AXA, LAX, DCM, INS, NII
 };
 
 
@@ -181,6 +184,9 @@ I(CLC); I(SEC); I(CLI); I(SEI); I(CLD); I(SED); I(CLV);
 /* Others */
 I(NOP) { } I(XXX) { assert(false); }
 
+/* Unofficial instructions */
+I(ASO); I(RLA); I(LSE); I(RRA); I(AXS); I(AXA); I(LAX); I(DCM); I(INS); I(NII);
+
 struct operation {
     void (*addressing_func)(void);
     void (*instruction_func)(void);
@@ -191,70 +197,70 @@ struct operation {
 };
 
 struct operation __operations[] = { 
-    OP( BRK, IMM, 7 ), OP( ORA, IZX, 6 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( NOP, IMP, 3 ), OP( ORA, ZP0, 3 ), OP( ASL, ZP0, 5 ), OP( XXX, IMP, 5 ),
-    OP( PHP, IMP, 3 ), OP( ORA, IMM, 2 ), OP( ASL, IMP, 2 ), OP( XXX, IMP, 2 ),
-    OP( NOP, IMP, 4 ), OP( ORA, ABS, 4 ), OP( ASL, ABS, 6 ), OP( XXX, IMP, 6 ),
-    OP( BPL, REL, 2 ), OP( ORA, IZY, 5 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( NOP, IMP, 4 ), OP( ORA, ZPX, 4 ), OP( ASL, ZPX, 6 ), OP( XXX, IMP, 6 ),
-    OP( CLC, IMP, 2 ), OP( ORA, ABY, 4 ), OP( NOP, IMP, 2 ), OP( XXX, IMP, 7 ),
-    OP( NOP, IMP, 4 ), OP( ORA, ABX, 4 ), OP( ASL, ABX, 7 ), OP( XXX, IMP, 7 ),
-    OP( JSR, ABS, 6 ), OP( AND, IZX, 6 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( BIT, ZP0, 3 ), OP( AND, ZP0, 3 ), OP( ROL, ZP0, 5 ), OP( XXX, IMP, 5 ),
-    OP( PLP, IMP, 4 ), OP( AND, IMM, 2 ), OP( ROL, IMP, 2 ), OP( XXX, IMP, 2 ),
-    OP( BIT, ABS, 4 ), OP( AND, ABS, 4 ), OP( ROL, ABS, 6 ), OP( XXX, IMP, 6 ),
-    OP( BMI, REL, 2 ), OP( AND, IZY, 5 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( NOP, IMP, 4 ), OP( AND, ZPX, 4 ), OP( ROL, ZPX, 6 ), OP( XXX, IMP, 6 ),
-    OP( SEC, IMP, 2 ), OP( AND, ABY, 4 ), OP( NOP, IMP, 2 ), OP( XXX, IMP, 7 ),
-    OP( NOP, IMP, 4 ), OP( AND, ABX, 4 ), OP( ROL, ABX, 7 ), OP( XXX, IMP, 7 ),
-    OP( RTI, IMP, 6 ), OP( EOR, IZX, 6 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( NOP, IMP, 3 ), OP( EOR, ZP0, 3 ), OP( LSR, ZP0, 5 ), OP( XXX, IMP, 5 ),
-    OP( PHA, IMP, 3 ), OP( EOR, IMM, 2 ), OP( LSR, IMP, 2 ), OP( XXX, IMP, 2 ),
-    OP( JMP, ABS, 3 ), OP( EOR, ABS, 4 ), OP( LSR, ABS, 6 ), OP( XXX, IMP, 6 ),
-    OP( BVC, REL, 2 ), OP( EOR, IZY, 5 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( NOP, IMP, 4 ), OP( EOR, ZPX, 4 ), OP( LSR, ZPX, 6 ), OP( XXX, IMP, 6 ),
-    OP( CLI, IMP, 2 ), OP( EOR, ABY, 4 ), OP( NOP, IMP, 2 ), OP( XXX, IMP, 7 ),
-    OP( NOP, IMP, 4 ), OP( EOR, ABX, 4 ), OP( LSR, ABX, 7 ), OP( XXX, IMP, 7 ),
-    OP( RTS, IMP, 6 ), OP( ADC, IZX, 6 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( NOP, IMP, 3 ), OP( ADC, ZP0, 3 ), OP( ROR, ZP0, 5 ), OP( XXX, IMP, 5 ),
-    OP( PLA, IMP, 4 ), OP( ADC, IMM, 2 ), OP( ROR, IMP, 2 ), OP( XXX, IMP, 2 ),
-    OP( JMP, IND, 5 ), OP( ADC, ABS, 4 ), OP( ROR, ABS, 6 ), OP( XXX, IMP, 6 ),
-    OP( BVS, REL, 2 ), OP( ADC, IZY, 5 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( NOP, IMP, 4 ), OP( ADC, ZPX, 4 ), OP( ROR, ZPX, 6 ), OP( XXX, IMP, 6 ),
-    OP( SEI, IMP, 2 ), OP( ADC, ABY, 4 ), OP( NOP, IMP, 2 ), OP( XXX, IMP, 7 ),
-    OP( NOP, IMP, 4 ), OP( ADC, ABX, 4 ), OP( ROR, ABX, 7 ), OP( XXX, IMP, 7 ),
-    OP( NOP, IMP, 2 ), OP( STA, IZX, 6 ), OP( NOP, IMP, 2 ), OP( XXX, IMP, 6 ),
-    OP( STY, ZP0, 3 ), OP( STA, ZP0, 3 ), OP( STX, ZP0, 3 ), OP( XXX, IMP, 3 ),
-    OP( DEY, IMP, 2 ), OP( NOP, IMP, 2 ), OP( TXA, IMP, 2 ), OP( XXX, IMP, 2 ),
-    OP( STY, ABS, 4 ), OP( STA, ABS, 4 ), OP( STX, ABS, 4 ), OP( XXX, IMP, 4 ),
-    OP( BCC, REL, 2 ), OP( STA, IZY, 6 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 6 ),
-    OP( STY, ZPX, 4 ), OP( STA, ZPX, 4 ), OP( STX, ZPY, 4 ), OP( XXX, IMP, 4 ),
-    OP( TYA, IMP, 2 ), OP( STA, ABY, 5 ), OP( TXS, IMP, 2 ), OP( XXX, IMP, 5 ),
-    OP( NOP, IMP, 5 ), OP( STA, ABX, 5 ), OP( XXX, IMP, 5 ), OP( XXX, IMP, 5 ),
-    OP( LDY, IMM, 2 ), OP( LDA, IZX, 6 ), OP( LDX, IMM, 2 ), OP( XXX, IMP, 6 ),
-    OP( LDY, ZP0, 3 ), OP( LDA, ZP0, 3 ), OP( LDX, ZP0, 3 ), OP( XXX, IMP, 3 ),
-    OP( TAY, IMP, 2 ), OP( LDA, IMM, 2 ), OP( TAX, IMP, 2 ), OP( XXX, IMP, 2 ),
-    OP( LDY, ABS, 4 ), OP( LDA, ABS, 4 ), OP( LDX, ABS, 4 ), OP( XXX, IMP, 4 ),
-    OP( BCS, REL, 2 ), OP( LDA, IZY, 5 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 5 ),
-    OP( LDY, ZPX, 4 ), OP( LDA, ZPX, 4 ), OP( LDX, ZPY, 4 ), OP( XXX, IMP, 4 ),
-    OP( CLV, IMP, 2 ), OP( LDA, ABY, 4 ), OP( TSX, IMP, 2 ), OP( XXX, IMP, 4 ),
-    OP( LDY, ABX, 4 ), OP( LDA, ABX, 4 ), OP( LDX, ABY, 4 ), OP( XXX, IMP, 4 ),
-    OP( CPY, IMM, 2 ), OP( CMP, IZX, 6 ), OP( NOP, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( CPY, ZP0, 3 ), OP( CMP, ZP0, 3 ), OP( DEC, ZP0, 5 ), OP( XXX, IMP, 5 ),
-    OP( INY, IMP, 2 ), OP( CMP, IMM, 2 ), OP( DEX, IMP, 2 ), OP( XXX, IMP, 2 ),
-    OP( CPY, ABS, 4 ), OP( CMP, ABS, 4 ), OP( DEC, ABS, 6 ), OP( XXX, IMP, 6 ),
-    OP( BNE, REL, 2 ), OP( CMP, IZY, 5 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( NOP, IMP, 4 ), OP( CMP, ZPX, 4 ), OP( DEC, ZPX, 6 ), OP( XXX, IMP, 6 ),
-    OP( CLD, IMP, 2 ), OP( CMP, ABY, 4 ), OP( NOP, IMP, 2 ), OP( XXX, IMP, 7 ),
-    OP( NOP, IMP, 4 ), OP( CMP, ABX, 4 ), OP( DEC, ABX, 7 ), OP( XXX, IMP, 7 ),
-    OP( CPX, IMM, 2 ), OP( SBC, IZX, 6 ), OP( NOP, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( CPX, ZP0, 3 ), OP( SBC, ZP0, 3 ), OP( INC, ZP0, 5 ), OP( XXX, IMP, 5 ),
-    OP( INX, IMP, 2 ), OP( SBC, IMM, 2 ), OP( NOP, IMP, 2 ), OP( SBC, IMP, 2 ),
-    OP( CPX, ABS, 4 ), OP( SBC, ABS, 4 ), OP( INC, ABS, 6 ), OP( XXX, IMP, 6 ),
-    OP( BEQ, REL, 2 ), OP( SBC, IZY, 5 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 8 ),
-    OP( NOP, IMP, 4 ), OP( SBC, ZPX, 4 ), OP( INC, ZPX, 6 ), OP( XXX, IMP, 6 ),
-    OP( SED, IMP, 2 ), OP( SBC, ABY, 4 ), OP( NOP, IMP, 2 ), OP( XXX, IMP, 7 ),
-    OP( NOP, IMP, 4 ), OP( SBC, ABX, 4 ), OP( INC, ABX, 7 ), OP( XXX, IMP, 7 )
+    OP( BRK, IMP, 7 ), OP( ORA, IZX, 6 ), OP( XXX, IMP, 2 ), OP( ASO, IZX, 8 ), 
+    OP( NOP, ZP0, 3 ), OP( ORA, ZP0, 3 ), OP( ASL, ZP0, 5 ), OP( ASO, ZP0, 5 ), 
+    OP( PHP, IMP, 3 ), OP( ORA, IMM, 2 ), OP( ASL, IMP, 2 ), OP( XXX, IMP, 2 ), 
+    OP( NOP, ABS, 4 ), OP( ORA, ABS, 4 ), OP( ASL, ABS, 6 ), OP( ASO, ABS, 6 ), 
+    OP( BPL, REL, 2 ), OP( ORA, IZY, 5 ), OP( XXX, IMP, 2 ), OP( ASO, IZY, 8 ), 
+    OP( NOP, ZPX, 4 ), OP( ORA, ZPX, 4 ), OP( ASL, ZPX, 6 ), OP( ASO, ZPX, 6 ), 
+    OP( CLC, IMP, 2 ), OP( ORA, ABY, 4 ), OP( NII, IMP, 2 ), OP( ASO, ABY, 7 ), 
+    OP( NOP, ABX, 4 ), OP( ORA, ABX, 4 ), OP( ASL, ABX, 7 ), OP( ASO, ABX, 7 ), 
+    OP( JSR, ABS, 6 ), OP( AND, IZX, 6 ), OP( XXX, IMP, 2 ), OP( RLA, IZX, 8 ), 
+    OP( BIT, ZP0, 3 ), OP( AND, ZP0, 3 ), OP( ROL, ZP0, 5 ), OP( RLA, ZP0, 5 ), 
+    OP( PLP, IMP, 4 ), OP( AND, IMM, 2 ), OP( ROL, IMP, 2 ), OP( XXX, IMP, 2 ), 
+    OP( BIT, ABS, 4 ), OP( AND, ABS, 2 ), OP( ROL, ABS, 6 ), OP( RLA, ABS, 6 ), 
+    OP( BMI, REL, 2 ), OP( AND, IZY, 5 ), OP( XXX, IMP, 2 ), OP( RLA, IZY, 8 ), 
+    OP( NOP, ZPX, 4 ), OP( AND, ZPX, 4 ), OP( ROL, ZPX, 6 ), OP( RLA, ZPX, 6 ), 
+    OP( SEC, IMP, 2 ), OP( AND, ABY, 4 ), OP( NII, IMP, 2 ), OP( RLA, ABY, 7 ), 
+    OP( NOP, ABX, 4 ), OP( AND, ABX, 4 ), OP( ROL, ABX, 7 ), OP( RLA, ABX, 7 ), 
+    OP( RTI, IMP, 6 ), OP( EOR, IZX, 6 ), OP( XXX, IMP, 2 ), OP( LSE, IZX, 8 ), 
+    OP( NOP, ZP0, 3 ), OP( EOR, ZP0, 3 ), OP( LSR, ZP0, 5 ), OP( LSE, ZP0, 5 ), 
+    OP( PHA, IMP, 3 ), OP( EOR, IMM, 2 ), OP( LSR, IMP, 2 ), OP( XXX, IMP, 2 ), 
+    OP( JMP, ABS, 3 ), OP( EOR, ABS, 4 ), OP( LSR, ABS, 6 ), OP( LSE, ABS, 6 ), 
+    OP( BVC, REL, 2 ), OP( EOR, IZY, 5 ), OP( XXX, IMP, 2 ), OP( LSE, IZY, 8 ), 
+    OP( NOP, ZPX, 4 ), OP( EOR, ZPX, 4 ), OP( LSR, ZPX, 6 ), OP( LSE, ZPX, 6 ), 
+    OP( CLI, IMP, 2 ), OP( EOR, ABY, 4 ), OP( NII, IMP, 2 ), OP( LSE, ABY, 7 ), 
+    OP( NOP, ABX, 4 ), OP( EOR, ABX, 4 ), OP( LSR, ABX, 7 ), OP( LSE, ABX, 7 ), 
+    OP( RTS, IMP, 6 ), OP( ADC, IZX, 6 ), OP( XXX, IMP, 2 ), OP( RRA, IZX, 8 ), 
+    OP( NOP, ZP0, 3 ), OP( ADC, ZP0, 3 ), OP( ROR, ZP0, 5 ), OP( RRA, ZP0, 5 ), 
+    OP( PLA, IMP, 4 ), OP( ADC, IMM, 2 ), OP( ROR, IMP, 2 ), OP( XXX, IMP, 2 ), 
+    OP( JMP, IND, 5 ), OP( ADC, ABS, 4 ), OP( ROR, ABS, 6 ), OP( RRA, ABS, 6 ), 
+    OP( BVS, REL, 2 ), OP( ADC, IZY, 5 ), OP( XXX, IMP, 2 ), OP( RRA, IZY, 8 ), 
+    OP( NOP, ZPX, 4 ), OP( ADC, ZPX, 4 ), OP( ROR, ZPX, 6 ), OP( RRA, ZPX, 6 ), 
+    OP( SEI, IMP, 2 ), OP( ADC, ABY, 4 ), OP( NII, IMP, 2 ), OP( RRA, ABY, 7 ), 
+    OP( NOP, ABX, 4 ), OP( ADC, ABX, 4 ), OP( ROR, ABX, 7 ), OP( RRA, ABX, 7 ), 
+    OP( NII, IMM, 2 ), OP( STA, IZX, 6 ), OP( XXX, IMP, 2 ), OP( AXS, IZX, 6 ), 
+    OP( STY, ZP0, 3 ), OP( STA, ZP0, 3 ), OP( STX, ZP0, 3 ), OP( AXS, ZP0, 3 ), 
+    OP( DEY, IMP, 2 ), OP( XXX, IMP, 2 ), OP( TXA, IMP, 2 ), OP( XXX, IMP, 2 ), 
+    OP( STY, ABS, 4 ), OP( STA, ABS, 4 ), OP( STX, ABS, 4 ), OP( AXS, ABS, 4 ), 
+    OP( BCC, REL, 2 ), OP( STA, IZY, 6 ), OP( XXX, IMP, 2 ), OP( AXA, IZY, 6 ), 
+    OP( STY, ZPX, 4 ), OP( STA, ZPX, 4 ), OP( STX, ZPY, 4 ), OP( AXS, ZPY, 4 ), 
+    OP( TYA, IMP, 2 ), OP( STA, ABY, 5 ), OP( TXS, IMP, 2 ), OP( AXA, ABY, 5 ), 
+    OP( XXX, IMP, 2 ), OP( STA, ABX, 5 ), OP( XXX, IMP, 2 ), OP( XXX, IMP, 2 ), 
+    OP( LDY, IMM, 2 ), OP( LDA, IZX, 6 ), OP( LDX, IMM, 2 ), OP( LAX, IZX, 6 ), 
+    OP( LDY, ZP0, 3 ), OP( LDA, ZP0, 3 ), OP( LDX, ZP0, 3 ), OP( LAX, ZP0, 3 ), 
+    OP( TAY, IMP, 2 ), OP( LDA, IMM, 2 ), OP( TAX, IMP, 2 ), OP( XXX, IMP, 2 ), 
+    OP( LDY, ABS, 4 ), OP( LDA, ABS, 4 ), OP( LDX, ABS, 4 ), OP( LAX, ABS, 4 ), 
+    OP( BCS, REL, 2 ), OP( LDA, IZY, 5 ), OP( XXX, IMP, 2 ), OP( LAX, IZY, 5 ), 
+    OP( LDY, ZPX, 4 ), OP( LDA, ZPX, 4 ), OP( LDX, ZPY, 4 ), OP( LAX, ZPY, 4 ), 
+    OP( CLV, IMP, 2 ), OP( LDA, ABY, 4 ), OP( TSX, IMP, 2 ), OP( XXX, IMP, 2 ), 
+    OP( LDY, ABX, 4 ), OP( LDA, ABX, 4 ), OP( LDX, ABY, 4 ), OP( LAX, ABY, 4 ), 
+    OP( CPY, IMM, 2 ), OP( CMP, IZX, 6 ), OP( XXX, IMP, 2 ), OP( DCM, IZX, 8 ), 
+    OP( CPY, ZP0, 3 ), OP( CMP, ZP0, 3 ), OP( DEC, ZP0, 5 ), OP( DCM, ZP0, 5 ), 
+    OP( INY, IMP, 2 ), OP( CMP, IMM, 2 ), OP( DEX, IMP, 2 ), OP( XXX, IMP, 2 ), 
+    OP( CPY, ABS, 4 ), OP( CMP, ABS, 4 ), OP( DEC, ABS, 6 ), OP( DCM, ABS, 6 ), 
+    OP( BNE, REL, 2 ), OP( CMP, IZY, 5 ), OP( XXX, IMP, 2 ), OP( DCM, IZY, 8 ), 
+    OP( NII, ZPX, 4 ), OP( CMP, ZPX, 4 ), OP( DEC, ZPX, 6 ), OP( DCM, ZPX, 6 ), 
+    OP( CLD, IMP, 2 ), OP( CMP, ABY, 4 ), OP( NII, IMP, 2 ), OP( DCM, ABY, 7 ), 
+    OP( NII, ABX, 4 ), OP( CMP, ABX, 4 ), OP( DEC, ABX, 7 ), OP( DCM, ABX, 7 ), 
+    OP( CPX, IMM, 2 ), OP( SBC, IZX, 6 ), OP( XXX, IMP, 2 ), OP( INS, IZX, 8 ), 
+    OP( CPX, ZP0, 3 ), OP( SBC, ZP0, 3 ), OP( INC, ZP0, 5 ), OP( INS, ZP0, 5 ), 
+    OP( INX, IMP, 2 ), OP( SBC, IMM, 2 ), OP( NII, IMP, 2 ), OP( SBC, IMM, 2 ), 
+    OP( CPX, ABS, 4 ), OP( SBC, ABS, 4 ), OP( INC, ABS, 6 ), OP( INS, ABS, 6 ), 
+    OP( BEQ, REL, 2 ), OP( SBC, IZY, 5 ), OP( XXX, IMP, 2 ), OP( INS, IZY, 8 ), 
+    OP( NII, ZPX, 4 ), OP( SBC, ZPX, 4 ), OP( INC, ZPX, 6 ), OP( INS, ZPX, 6 ), 
+    OP( SED, IMP, 2 ), OP( SBC, ABY, 4 ), OP( NII, IMP, 2 ), OP( INS, ABY, 7 ), 
+    OP( NII, ABX, 4 ), OP( SBC, ABX, 4 ), OP( INC, ABX, 7 ), OP( INS, ABX, 7 )
 };
 
 #pragma endregion
@@ -600,6 +606,89 @@ I(SEI) { SetFlag(i, 1); }
 I(CLD) { SetFlag(d, 0); }
 I(SED) { SetFlag(d, 1); }
 I(CLV) { SetFlag(v, 0); }
+#pragma endregion
+
+#pragma region "Unofficial instructions"
+I(ASO) {
+	u8 operand = fetch_operand();
+	SetFlag(c, operand & 0x80);
+	operand <<= 1;
+	store_operand(operand);
+	__a |= operand;
+	SetFlag(z, __a == 0x00);
+	SetFlag(n, __a & 0x80);
+}
+I(RLA) {
+	u8 operand = fetch_operand();
+	u8 c = GetFlag(c);
+	SetFlag(c, operand & 0x80);
+	operand = (operand << 1) | (c & 0x01);
+	store_operand(operand);
+	__a &= operand;
+	SetFlag(z, __a == 0x00);
+	SetFlag(n, __a & 0x80);
+}
+I(LSE) {
+	u8 operand = fetch_operand();
+	SetFlag(c, operand & 0x01);
+	operand >>= 1;
+	store_operand(operand);
+	__a ^= operand;
+	SetFlag(z, __a == 0x00);
+	SetFlag(n, __a & 0x80);
+}
+I(RRA) {
+	u8 operand = fetch_operand();
+	u8 c = GetFlag(c);
+	SetFlag(c, operand & 0x01);
+	operand = (operand >> 1) | (c << 7);
+	store_operand(operand);
+	
+	u16 temp = __a + operand + GetFlag(c);
+	SetFlag(c, temp > 0x00FF);
+	SetFlag(z, (temp & 0x00FF) == 0x00);
+	SetFlag(v, 0x80 & (temp ^ __a) & (temp ^ operand));
+	SetFlag(n, temp & 0x80);
+	__a = temp & 0x00FF;
+}
+I(AXS) {
+	store_operand(__a & __x);
+}
+I(AXA) {
+	u8 val = __a & __x & ((__helper_addr >> 8) + 1);
+	store_operand(val);
+}
+I(LAX) {
+	__a = fetch_operand();
+	__x = __a;
+	SetFlag(z, __a == 0x00);
+	SetFlag(n, __a & 0x80);
+}
+I(DCM) {
+	u8 operand = fetch_operand();
+	operand--; // DEC
+	store_operand(operand);
+	// CMP
+	SetFlag(c, __a >= operand);
+	SetFlag(z, __a == operand);
+	SetFlag(n, 0x80 & (__a - operand));
+}
+I(INS) {
+	u8 operand = fetch_operand();
+	operand++;
+	store_operand(operand);
+	u8 sbc_operand = ~operand;
+	u16 temp = __a + sbc_operand + GetFlag(c);
+	SetFlag(c, temp > 0x00FF);
+	temp &= 0xFF;
+	SetFlag(z, temp == 0x00);
+	SetFlag(v, 0x80 & (temp ^ __a) & (temp ^ sbc_operand));
+	SetFlag(n, temp & 0x80);
+	__a = temp;
+}
+I(NII) { 
+	// Unofficial opcode, It often seems like a NOP.
+}
 #pragma endregion
 
 #pragma endregion
