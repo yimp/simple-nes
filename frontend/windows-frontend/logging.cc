@@ -31,7 +31,7 @@ std::string Timestamp::YYYY_MM_DD_HH_MM_SS_UUUUUU() const
     time_t seconds = _us_since_epoch / 1000000ull;
     int64_t us = _us_since_epoch % 1000000ull;
 
-    ::gmtime_s(&tm_time, &seconds);
+    ::localtime_s(&tm_time, &seconds);
 
     char buf[64];
     std::snprintf(buf, 64, "%04d-%02d-%02d %02d:%02d:%02d.%06d"
